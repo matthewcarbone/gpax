@@ -1,10 +1,19 @@
 #!/bin/bash
 
+install() {
+	if [ ! "$1" ]; then
+		echo "No argument supplied - installing core dependencies"
+		TARGET='["project"]["dependencies"]'
+	else
+		echo "Target supplied: $1"
+		TARGET="['project']['optional-dependencies']['$1']"
+	fi
+
+	echo "installing $TARGET"
+
+	python3 -c "import toml; c = toml.load('pyproject.toml'); print('\n'.join(c$TARGET))" |
+		pip install -r /dev/stdin
+}
+
 pip install toml
-
-if [ "$1" = "test" ]; then
-	python3 -c 'import toml; c = toml.load("pyproject.toml"); print("\n".join(c["project"]["optional-dependencies"]["test"]))' | pip install -r /dev/stdin
-
-else
-	python3 -c 'import toml; c = toml.load("pyproject.toml"); print("\n".join(c["project"]["dependencies"]))' | pip install -r /dev/stdin
-fi
+install "$1"
