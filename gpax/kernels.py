@@ -6,26 +6,25 @@ Kernel functions
 
 Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
-    Update starting in August 2024 to change all kernels to classes
-    instead of functions.
 """
 
-import math
+# import math
 
 import jax.numpy as jnp
+import numpyro
+import numpyro.distributions as dist
 from jax import jit
 from monty.json import MSONable
 
+# def _sqrt(x, eps=1e-12):
+#     return jnp.sqrt(x + eps)
 
-def _sqrt(x, eps=1e-12):
-    return jnp.sqrt(x + eps)
 
-
-def add_jitter(x, jitter=1e-6):
+def _add_jitter(x, jitter=1e-6):
     return x + jitter
 
 
-def squared_distance(X, Z):
+def _squared_distance(X, Z, lengthscale):
     """Computes a square of scaled distance, :math:`\|\frac{X-Z}{l}\|^2`,
     between X and Z are vectors with :math:`n x num_features` dimensions
 
@@ -39,143 +38,150 @@ def squared_distance(X, Z):
     jnp.ndarray
     """
 
-    X2 = (X**2).sum(1, keepdims=True)
-    Z2 = (Z**2).sum(1, keepdims=True)
-    XZ = jnp.matmul(X, Z.T)
+    scaled_X = X / lengthscale
+    scaled_Z = Z / lengthscale
+    X2 = (scaled_X**2).sum(1, keepdims=True)
+    Z2 = (scaled_Z**2).sum(1, keepdims=True)
+    XZ = jnp.matmul(scaled_X, scaled_Z.T)
     r2 = X2 - 2 * XZ + Z2.T
     return r2.clip(0)
 
 
+def get_parameter_prior(name, distribution, plate_dims=1):
+    """A utility function for getting a numpyro prior from a provided
+    distribution. Floats and ints are interpreted as deterministic values.
+
+    Parameters
+    ----------
+    name : str
+        The name of the variable
+    distribution : numpyro.distributions.Distribution or float or int
+        The prior distribution to sample from. This is interpreted as
+        numpyro.deterministic if float or int.
+    plate_dims : int
+        The number of dimensions to run the numpyro plate primitive over.
+        Defaults to 1.
+
+    Returns
+    -------
+    Some numpyro object depending on whether or not distribution is a true
+    distribution or just some constant value.
+    """
+
+    if isinstance(distribution, (float, int)):
+        return numpyro.deterministic(name, jnp.array(distribution))
+
+    if not isinstance(distribution, numpyro.distributions.Distribution):
+        raise ValueError(
+            f"Provided distribution {distribution} was not of type float, "
+            "int, or numpyro.distribution.Distribution, but is required to "
+            "be one of these types."
+        )
+
+    # Otherwise, the provided distribution is a numpyro distribution object
+    if plate_dims == 1:
+        return numpyro.sample(name, distribution)
+
+    with numpyro.plate(f"{name}_plate", plate_dims):
+        return numpyro.sample(name, distribution)
+
+
+def get_parameter_as_float(parameter):
+    """Converts a provided parameter, potentially a numpyro distribution,
+    into a 'reduced' representation. This will either be simply the provided
+    parameter if constant (float or int), or the mean of a distribution if
+    parameter is of type numpyro.distributions.Distribution."""
+
+    if isinstance(parameter, numpyro.distributions.Distribution):
+        return parameter.mean
+    return parameter
+
+
 class Kernel(MSONable):
-    def __init__(self, noise=None, jitter=1e-6):
-        self.noise = noise
-        self.jitter = jitter
-
-
-@jit
-def _rbf_kernel(X, Z, k_scale, k_length, noise, jitter):
-    r2 = squared_distance(X / k_length, Z / k_length)
-    k = k_scale * jnp.exp(-0.5 * r2)
-    if X.shape == Z.shape:
-        k += add_jitter(noise, jitter) * jnp.eye(X.shape[0])
-    return k
+    def __init__(self, k_noise=0.0, k_jitter=1e-6):
+        self.k_noise = k_noise
+        self.k_jitter = k_jitter
 
 
 class RBFKernel(Kernel):
-    """Radial basis function kernel.
+    @property
+    def kernel_params(self):
+        return {
+            "k_scale": self.k_scale,
+            "k_length": self.k_length,
+            "k_noise": self.k_noise,
+            "k_jitter": self.k_jitter,
+        }
 
-    Parameters
-    ----------
-    k_scale : jnp.ndarray or float
-        The absolute scale of the kernel function.
-    k_length : jnp.ndarray or float
-        The lengthscale of the kernel function.
-    """
-
-    def __init__(self, k_scale=1.0, k_length=1.0):
+    def __init__(
+        self,
+        k_scale=dist.LogNormal(0.0, 1.0),
+        k_scale_dims=1,
+        k_length=dist.LogNormal(0.0, 1.0),
+        k_length_dims=1,
+        k_noise=dist.LogNormal(0.0, 1.0),
+        k_jitter=1e-6,
+    ):
+        super().__init__(k_noise=k_noise, k_jitter=k_jitter)
         self.k_scale = k_scale
+        self.k_scale_dims = k_scale_dims
         self.k_length = k_length
+        self.k_length_dims = k_length_dims
 
-    def __call__(self, X, Z):
-        """
-        Parameters
-        ----------
-        X, Z : jnp.ndarray
-            A 2d vector with dimension (N, N_features)
+    @staticmethod
+    @jit
+    def kernel(
+        X1, X2, k_scale, k_length, k_noise=0.0, k_jitter=1e-6, apply_noise=True
+    ):
+        r2 = _squared_distance(X1, X2, k_length)
+        k = k_scale * jnp.exp(-0.5 * r2)
+        if X1.shape == X2.shape and apply_noise:
+            k += _add_jitter(k_noise, k_jitter) * jnp.eye(X1.shape[0])
+        return k
 
-        Returns
-        -------
-        jnp.ndarray
-        """
+    def sample_parameters(self):
+        return {
+            "k_scale": get_parameter_prior(
+                "k_scale", self.k_scale, self.k_scale_dims
+            ),
+            "k_length": get_parameter_prior(
+                "k_length", self.k_length, self.k_length_dims
+            ),
+            "k_noise": get_parameter_prior("k_noise", self.k_noise, 1),
+            "k_jitter": get_parameter_prior("k_jitter", self.k_jitter, 1),
+        }
 
-        return _rbf_kernel(
-            X, Z, self.k_scale, self.k_length, self.noise, self.jitter
-        )
+    def get_sample_parameter_means(self):
+        return {
+            "k_scale": get_parameter_as_float(self.k_scale),
+            "k_length": get_parameter_as_float(self.k_length),
+            "k_noise": get_parameter_as_float(self.k_noise),
+            "k_jitter": get_parameter_as_float(self.k_jitter),
+        }
 
+    def sample_prior(self, X1, X2):
+        """Radial basis function kernel prior. The parameters of this function
+        are assumed to be distributions."""
 
-@jit
-def _matern_kernel(X, Z, k_scale, k_length, noise, jitter):
-    r2 = squared_distance(X / k_length, Z / k_length)
-    r = _sqrt(r2)
-    sqrt5_r = 5**0.5 * r
-    k = k_scale * (1 + sqrt5_r + (5 / 3) * r2) * jnp.exp(-sqrt5_r)
-    if X.shape == Z.shape:
-        k += add_jitter(noise, jitter) * jnp.eye(X.shape[0])
-    return k
-
-
-class MaternKernel(Kernel):
-    """Matern basis function kernel.
-
-    Parameters
-    ----------
-    k_scale : jnp.ndarray or float
-        The absolute scale of the kernel function.
-    k_length : jnp.ndarray or float
-        The lengthscale of the kernel function.
-    """
-
-    def __init__(self, k_scale=1.0, k_length=1.0):
-        self.k_scale = k_scale
-        self.k_length = k_length
-
-    def __call__(self, X, Z):
-        """
-        Parameters
-        ----------
-        X, Z : jnp.ndarray
-            A 2d vector with dimension (N, N_features)
-
-        Returns
-        -------
-        jnp.ndarray
-        """
-
-        return _matern_kernel(
-            X, Z, self.k_scale, self.k_length, self.noise, self.jitter
-        )
+        return RBFKernel.kernel(X1, X2, **self.sample_parameters())
 
 
-@jit
-def _periodic_kernel(X, Z, k_scale, k_length, k_period, noise, jitter):
-    d = X[:, None] - Z[None]
-    scaled_sin = jnp.sin(math.pi * d / k_period) / k_length
-    k = k_scale * jnp.exp(-2 * (scaled_sin**2).sum(-1))
-    if X.shape == Z.shape:
-        k += add_jitter(noise, jitter) * jnp.eye(X.shape[0])
-    return k
-
-
-class PeriodicKernel(Kernel):
-    """Periodic kernel.
-
-    Parameters
-    ----------
-    k_scale : jnp.ndarray or float
-        The absolute scale of the kernel function.
-    k_length : jnp.ndarray or float
-        The lengthscale of the kernel function.
-    k_period : jnp.ndarray or float
-        The period of the kernel function.
-    """
-
-    def __init__(self, k_scale=1.0, k_length=1.0, k_period=1.0):
-        self.k_scale = k_scale
-        self.k_length = k_length
-        self.k_period = k_period
-
-    def __call__(self, X, Z):
-        """
-        Parameters
-        ----------
-        X, Z : jnp.ndarray
-            A 2d vector with dimension (N, N_features)
-
-        Returns
-        -------
-        jnp.ndarray
-        """
-
-        return _periodic_kernel(
-            X, Z, self.k_scale, self.k_length, self.noise, self.jitter
-        )
+# @jit
+# def _matern_kernel(X, Z, k_scale, k_length, noise, jitter):
+#     r2 = _squared_distance(X / k_length, Z / k_length)
+#     r = _sqrt(r2)
+#     sqrt5_r = 5**0.5 * r
+#     k = k_scale * (1 + sqrt5_r + (5 / 3) * r2) * jnp.exp(-sqrt5_r)
+#     if X.shape == Z.shape:
+#         k += _add_jitter(noise, jitter) * jnp.eye(X.shape[0])
+#     return k
+#
+#
+# @jit
+# def _periodic_kernel(X, Z, k_scale, k_length, k_period, noise, jitter):
+#     d = X[:, None] - Z[None]
+#     scaled_sin = jnp.sin(math.pi * d / k_period) / k_length
+#     k = k_scale * jnp.exp(-2 * (scaled_sin**2).sum(-1))
+#     if X.shape == Z.shape:
+#         k += _add_jitter(noise, jitter) * jnp.eye(X.shape[0])
+#     return k

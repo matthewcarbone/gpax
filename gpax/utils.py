@@ -7,12 +7,11 @@ Utility functions
 Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 """
 
-from typing import Union, Dict, Type, List
+from typing import Dict, List, Type, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as onp
-
 import numpyro
 
 
@@ -30,8 +29,9 @@ def get_keys(seed: int = 0):
     return rng_key_1, rng_key_2
 
 
-def split_in_batches(X_new: Union[onp.ndarray, jnp.ndarray],
-                     batch_size: int = 100, dim: int = 0):
+def split_in_batches(
+    X_new: Union[onp.ndarray, jnp.ndarray], batch_size: int = 100, dim: int = 0
+):
     """
     Splits array into batches along the first or second dimensions
     """
@@ -41,18 +41,21 @@ def split_in_batches(X_new: Union[onp.ndarray, jnp.ndarray],
     X_split = []
     for i in range(num_batches):
         if dim == 0:
-            X_i = X_new[i*batch_size:(i+1)*batch_size]
+            X_i = X_new[i * batch_size : (i + 1) * batch_size]
         else:
-            X_i = X_new[:, i*batch_size:(i+1)*batch_size]
+            X_i = X_new[:, i * batch_size : (i + 1) * batch_size]
         X_split.append(X_i)
-    X_i = X_new[(i+1)*batch_size:] if dim == 0 else X_new[:, (i+1)*batch_size:]
+    X_i = (
+        X_new[(i + 1) * batch_size :] if dim == 0 else X_new[:, (i + 1) * batch_size :]
+    )
     if X_i.shape[dim] > 0:
         X_split.append(X_i)
     return X_split
 
 
-def split_dict(data: Dict[str, jnp.ndarray], chunk_size: int
-               ) -> List[Dict[str, jnp.ndarray]]:
+def split_dict(
+    data: Dict[str, jnp.ndarray], chunk_size: int
+) -> List[Dict[str, jnp.ndarray]]:
     """Splits a dictionary of arrays into a list of smaller dictionaries.
 
     Args:
@@ -73,7 +76,7 @@ def split_dict(data: Dict[str, jnp.ndarray], chunk_size: int
     result = []
     for i in range(num_chunks):
         start_idx = i * chunk_size
-        end_idx = min((i+1) * chunk_size, N)
+        end_idx = min((i + 1) * chunk_size, N)
 
         chunk = {key: value[start_idx:end_idx] for key, value in data.items()}
         result.append(chunk)
@@ -81,9 +84,9 @@ def split_dict(data: Dict[str, jnp.ndarray], chunk_size: int
     return result
 
 
-def random_sample_dict(data: Dict[str, jnp.ndarray],
-                       num_samples: int,
-                       rng_key: jnp.ndarray) -> Dict[str, jnp.ndarray]:
+def random_sample_dict(
+    data: Dict[str, jnp.ndarray], num_samples: int, rng_key: jnp.ndarray
+) -> Dict[str, jnp.ndarray]:
     """Returns a dictionary with a smaller number of consistent random samples for each array.
 
     Args:
@@ -102,7 +105,9 @@ def random_sample_dict(data: Dict[str, jnp.ndarray],
     return {key: value[indices] for key, value in data.items()}
 
 
-def get_haiku_dict(kernel_params: Dict[str, jnp.ndarray]) -> Dict[str, Dict[str, jnp.ndarray]]:
+def get_haiku_dict(
+    kernel_params: Dict[str, jnp.ndarray],
+) -> Dict[str, Dict[str, jnp.ndarray]]:
     """
     Extracts weights and biases from viDKL dictionary into a separate
     dictionary compatible with haiku's .apply() method
@@ -110,10 +115,10 @@ def get_haiku_dict(kernel_params: Dict[str, jnp.ndarray]) -> Dict[str, Dict[str,
     all_weights = {}
     all_biases = {}
     for key, val in kernel_params.items():
-        if key.startswith('feature_extractor'):
-            name_split = key.split('/')
-            name_new = name_split[1] + '/' + name_split[2][:-2]
-            if name_split[2][-1] == 'b':
+        if key.startswith("feature_extractor"):
+            name_split = key.split("/")
+            name_new = name_split[1] + "/" + name_split[2][:-2]
+            if name_split[2][-1] == "b":
                 all_biases[name_new] = val
             else:
                 all_weights[name_new] = val
@@ -164,11 +169,13 @@ def preprocess_sparse_image(sparse_image):
     # Extract non-zero values (targets) from the sparse image
     targets = sparse_image[non_zero_indices]
     # Generate indices for the entire image
-    full_indices = onp.array(onp.meshgrid(*[onp.arange(dim) for dim in sparse_image.shape])).T.reshape(-1, sparse_image.ndim)
+    full_indices = onp.array(
+        onp.meshgrid(*[onp.arange(dim) for dim in sparse_image.shape])
+    ).T.reshape(-1, sparse_image.ndim)
     return gp_input.astype(dtype), targets.astype(dtype), full_indices.astype(dtype)
 
 
-def initialize_inducing_points(X, ratio=0.1, method='uniform', key=None):
+def initialize_inducing_points(X, ratio=0.1, method="uniform", key=None):
     """
     Initialize inducing points for a sparse Gaussian Process in JAX.
 
@@ -187,15 +194,15 @@ def initialize_inducing_points(X, ratio=0.1, method='uniform', key=None):
     n_samples = X.shape[0]
     n_inducing = int(n_samples * ratio)
 
-    if method == 'uniform':
+    if method == "uniform":
         indices = jnp.linspace(0, n_samples - 1, n_inducing, dtype=jnp.int8)
         inducing_points = X[indices]
-    elif method == 'random':
+    elif method == "random":
         if key is None:
             raise ValueError("A JAX random key must be provided for random selection")
         indices = jax.random.choice(key, n_samples, shape=(n_inducing,), replace=False)
         inducing_points = X[indices]
-    elif method == 'kmeans':
+    elif method == "kmeans":
         try:
             from sklearn.cluster import KMeans  # noqa: F401
         except ImportError as e:
