@@ -15,8 +15,11 @@ from functools import partial
 import jax
 import jax.numpy as jnp
 import jax.random as jrp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
+from attrs import define, field
+from attrs.validators import gt, instance_of
 from monty.json import MSONable
 from numpyro.infer import (
     MCMC,
@@ -28,10 +31,58 @@ from numpyro.infer import (
 )
 from numpyro.infer.autoguide import AutoNormal
 
+from gpax.kernels import Kernel
+from gpax.transforms import ScaleTransform, Transform
+
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
 
+DATA_TYPES = [jnp.ndarray, np.ndarray, type(None)]
+
+
+@define
 class Data(MSONable):
+    """A helper class for storing and validating data used in in the various
+    Gaussian Process models.
+
+    Parameters
+    ----------
+    x, y : array_like, optional
+        Array-like objects representing the training data. It is valid to
+        provide None for both of these.
+    y_var : array_like, optional
+        The variance of the observations. Can also be a scalar, in which case
+        it is broadcasted to match the dimensions of the input x, y data.
+    """
+
+    @staticmethod
+    def _validate_data_entry(attribute, value, data_types):
+        data_types = tuple(data_types)
+        if not isinstance(value, data_types):
+            raise ValueError(
+                f"{attribute.name} is of type {type(value)} but must be one "
+                f"of {data_types}"
+            )
+
+    x = field()
+
+    @x.validator
+    def validate_x(self, attribute, value):
+        self._validate_data_entry(attribute, value, DATA_TYPES)
+
+    y = field()
+
+    @y.validator
+    def validate_y(self, attribute, value):
+        self._validate_data_entry(attribute, value, DATA_TYPES)
+
+    y_var = field()
+
+    @y_var.validator
+    def validate_y_var(self, attribute, value):
+        data_types = DATA_TYPES + [float] + [int]
+        self._validate_data_entry(attribute, value, data_types)
+
     def _assert_shapes(self):
         assert self.x.ndim == 2
         assert self.y.ndim == 1
@@ -40,19 +91,17 @@ class Data(MSONable):
             assert self.y_var.ndim == 1
             assert self.x.shape[0] == len(self.y_var)
 
-    def __init__(self, x, y, y_var=None):
-        self.x = x
-        self.y = y
-        if isinstance(y_var, (int, float)):
-            self.y_var = jnp.ones(len(y)) * y_var
+    def __attrs_post_init__(self):
+        if isinstance(self.y_var, (int, float)):
+            self.y_var = jnp.ones(len(self.y)) * self.y_var
         else:
-            self.y_var = y_var
+            self.y_var = self.y_var
         self._assert_shapes()
 
 
+@define
 class GaussianProcess(ABC, MSONable):
     """Core Gaussian process class.
-
 
     Parameters
     ----------
@@ -63,29 +112,25 @@ class GaussianProcess(ABC, MSONable):
     gp_samples : int
         The number of samples over the GP to take for each sampled
         hyperparameter.
-
-    Parameters
-    ----------
-    input_dim : int
-        The dimensionality of the input to the GP.
-    kernel
-    mean_function
-    kernel_prior : dict
-        A dictionary containing the prior distributions over the kernel
-        parameters. For example:
-
-        .. code-block:: python
-
-            def gp_kernel_custom_prior():
-                length = numpyro.sample(
-                    "k_length", numpyro.distributions.Uniform(0, 1)
-                )
-                scale = numpyro.sample(
-                    "k_scale", numpyro.distributions.LogNormal(0, 1)
-                )
-                return {"k_length": length, "k_scale": scale}
-
+    input_transform, output_transform : gpax.transforms.Transform
+        A transformation which is specified and operates on all input data
+        before it is seen by a GP, and all output data before it is seen by
+        the user. These are particularly useful when data is not standardized,
+        both for feature scaling and numerical stability.
     """
+
+    kernel = field(validator=instance_of(Kernel))
+    data = field(validator=instance_of(Data))
+    observation_noise = field(default=False, validator=instance_of(bool))
+    hp_samples = field(default=100, validator=[instance_of(int), gt(0)])
+    gp_samples = field(default=10, validator=[instance_of(int), gt(0)])
+    input_transform = field(
+        factory=ScaleTransform, validator=instance_of(Transform)
+    )
+    output_transform = field(
+        factory=ScaleTransform, validator=instance_of(Transform)
+    )
+    _is_fit = field(default=False, validator=instance_of(bool))
 
     @abstractmethod
     def sample(self): ...
@@ -105,22 +150,8 @@ class GaussianProcess(ABC, MSONable):
     def y_var(self):
         return self.data.y_var
 
-    def __init__(
-        self,
-        kernel,
-        data,
-        observation_noise,
-        model_fit=False,
-        hp_samples=100,
-        gp_samples=10,
-    ):
+    def __attrs_pre_init__(self):
         clear_cache()
-        self.kernel = kernel
-        self.data = data
-        self.observation_noise = observation_noise
-        self.model_fit = model_fit
-        self.hp_samples = hp_samples
-        self.gp_samples = gp_samples
 
     def get_mvn(self, x_new, kp):
         """A utility to get the multivariate normal posterior given the GP
@@ -136,6 +167,9 @@ class GaussianProcess(ABC, MSONable):
         tuple
             Two jnp.ndarrays for the mean and covariance matrix, respectively.
         """
+
+        # x_new is specified by the user and is not a private method. As such,
+        # the transform needs to be applied before the GP sees it
 
         f = self.kernel.kernel
         kp = deepcopy(kp)  # Kernel params
@@ -250,7 +284,7 @@ class GaussianProcess(ABC, MSONable):
 
         if self.data is None:
             return self._sample_unconditioned_prior(rng_key, x_new)
-        if not self.model_fit:
+        if not self._is_fit:
             return self._sample_conditioned_prior(rng_key, x_new)
         return self._sample_posterior(rng_key, x_new)
 
@@ -275,10 +309,9 @@ class GaussianProcess(ABC, MSONable):
         return y.mean(axis=[0, 1]), jnp.var(y, axis=[0, 1])
 
 
+@define
 class ExactGP(GaussianProcess):
-    def __init__(self, kernel, data, observation_noise=False, mcmc=None):
-        super().__init__(kernel, data, observation_noise)
-        self.mcmc = mcmc
+    mcmc = field(default=None)
 
     def fit(
         self,
@@ -331,7 +364,7 @@ class ExactGP(GaussianProcess):
         self.mcmc.run(rng_key, self.x, self.y, **mcmc_run_kwargs)
         if print_summary:
             self.mcmc.print_summary()
-        self.model_fit = True
+        self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
         samples = self.mcmc.get_samples(group_by_chain=False)
@@ -344,24 +377,15 @@ class ExactGP(GaussianProcess):
         return {**samples, "y": sampled}
 
 
+@define
 class VariationalInferenceGP(GaussianProcess):
-    def __init__(
-        self,
-        kernel,
-        data,
-        guide_factory=AutoNormal,
-        svi=None,
-        optimizer_factory=partial(numpyro.optim.Adam, step_size=1e-3, b1=0.5),
-        loss_factory=Trace_ELBO,
-        kernel_params=None,
-        observation_noise=False,
-    ):
-        super().__init__(kernel, data, observation_noise)
-        self.guide_factory = guide_factory
-        self.svi = svi
-        self.optimizer_factory = optimizer_factory
-        self.loss_factory = loss_factory
-        self.kernel_params = kernel_params
+    guide_factory = field(factory=AutoNormal)
+    svi = field(default=None)
+    optimizer_factory = field(
+        factory=partial(numpyro.optim.Adam, step_size=1e-3, b1=0.5)
+    )
+    loss_factory = field(factory=Trace_ELBO)
+    kernel_params = field(default=None)
 
     def _print_summary(self):
         params_map = self.svi.guide.median(self.kernel_params.params)
@@ -385,7 +409,7 @@ class VariationalInferenceGP(GaussianProcess):
         )
         if print_summary:
             self._print_summary()
-        self.model_fit = True
+        self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
         kernel_params = self.svi.guide.median(self.kernel_params.params)
@@ -398,7 +422,7 @@ class VariationalInferenceGP(GaussianProcess):
         # Override the default sampling behavior if the model is fit and
         # the data is provided. SVI is special in that there is only the
         # median kernel parameters to consider
-        if self.model_fit:
+        if self._is_fit:
             kernel_params = self.svi.guide.median(self.kernel_params.params)
             mean, cov = self.get_mvn(x_new, kernel_params)
             return mean, cov.diagonal()
