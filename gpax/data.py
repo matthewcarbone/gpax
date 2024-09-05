@@ -15,7 +15,7 @@ DATA_TYPES = (jnp.ndarray, np.ndarray, type(None))
 
 def ensure_2d(x):
     if x.ndim == 1:
-        x = x.reshape(1, -1)
+        x = x.reshape(-1, 1)
     return x
 
 
@@ -103,17 +103,15 @@ class Transform(ABC, MSONable):
             raise RuntimeError("Transform must be fit before forward/reverse")
         if self._is_fit and fitting:
             raise RuntimeError("Cannot fit the transform twice")
-        if x is None:
-            return None
         if not hasattr(x, "metadata"):
             raise ValueError("Input array must be of type Array")
         x = ensure_2d(x)
         return x
 
     def forward(self, x):
-        x = self._preprocess(x, False)
         if x is None:
             return None
+        x = self._preprocess(x, False)
         if x.metadata.is_transformed:
             return x
         t_as = x.metadata.transforms_as
@@ -127,9 +125,9 @@ class Transform(ABC, MSONable):
         return new_x
 
     def reverse(self, x):
-        x = self._preprocess(x, False)
         if x is None:
             return None
+        x = self._preprocess(x, False)
         if not x.metadata.is_transformed:
             return x
         t_as = x.metadata.transforms_as
