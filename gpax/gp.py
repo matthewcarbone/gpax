@@ -9,7 +9,6 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
 from abc import ABC, abstractmethod
-from contextlib import contextmanager
 from copy import deepcopy
 from functools import partial
 
@@ -32,8 +31,8 @@ from numpyro.infer import (
 )
 from numpyro.infer.autoguide import AutoNormal
 
-from gpax.data import Array, NormalizeTransform, ScaleTransform, Transform
 from gpax.kernels import Kernel
+from gpax.transforms import IdentityTransform, ScaleTransform, Transform
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -67,10 +66,11 @@ class GaussianProcess(ABC, MSONable):
     hp_samples = field(default=100, validator=[instance_of(int), gt(0)])
     gp_samples = field(default=10, validator=[instance_of(int), gt(0)])
     input_transform = field(
-        factory=ScaleTransform, validator=instance_of(Transform)
+        factory=ScaleTransform, validator=instance_of((Transform, type(None)))
     )
     output_transform = field(
-        factory=NormalizeTransform, validator=instance_of(Transform)
+        factory=ScaleTransform,
+        validator=instance_of((Transform, type(None))),
     )
     _is_fit = field(default=False, validator=instance_of(bool))
 
@@ -103,19 +103,6 @@ class GaussianProcess(ABC, MSONable):
     def __attrs_pre_init__(self):
         clear_cache()
 
-    def _assign_arrays(self):
-        if self.x is not None:
-            self.x = Array(self.x)
-            self.x.metadata.transforms_as = "mean"
-        if self.y is not None:
-            self.y = Array(self.y)
-            self.y.metadata.transforms_as = "mean"
-        if self.y_std is not None:
-            self.y_std = Array(self.y_std)
-            self.y_std.metadata.transforms_as = "std"
-        if (self.y is None) ^ (self.x is None):
-            raise ValueError("x and y must either both be None or not")
-
     def _fit_transforms(self):
         # This works even if x and y are None
         self.input_transform.fit(self.x)
@@ -126,35 +113,32 @@ class GaussianProcess(ABC, MSONable):
             self.y_std = jnp.ones(self.y_std.shape) * self.y_std
 
         # Assign everything as Array objects to keep track of transformations
-        self._assign_arrays()
+        if (self.y is None) ^ (self.x is None):
+            raise ValueError("x and y must either both be None or not")
+
+        if self.input_transform is None:
+            self.input_transform = IdentityTransform()
+        if self.output_transform is None:
+            self.output_transform = IdentityTransform()
 
         # Fit the transformation objects on all provided data
         self._fit_transforms()
 
-    def _get_transformed_data(self):
-        x = self.input_transform.forward(self.x)
-        y = self.output_transform.forward(self.y)
-        if y is not None:
-            y = y.squeeze()
-        y_std = self.output_transform.forward(self.y_std)
-        if y_std is not None:
-            y_std = y_std.squeeze()
-        return x, y, y_std
+    @property
+    def x_transformed(self):
+        return self.input_transform.forward(self.x, transforms_as="mean")
 
-    def _get_untransformed_data(self):
-        x = self.input_transform.reverse(self.x)
-        y = self.output_transform.reverse(self.y)
-        if y is not None:
-            y = y.squeeze()
-        y_std = self.output_transform.reverse(self.y_std)
-        if y_std is not None:
-            y_std = y_std.squeeze()
-        return x, y, y_std
+    @property
+    def y_transformed(self):
+        y = self.output_transform.forward(self.y, transforms_as="mean")
+        return y.squeeze()
 
-    def _forward_transform_input_as_mean(self, x):
-        x = Array(x)
-        x.metadata.transforms_as = "mean"
-        return self.input_transform.forward(x)
+    @property
+    def y_std_transformed(self):
+        y_std = self.input_transform.forward(self.y_std, transforms_as="std")
+        if y_std is None:
+            return None
+        return y_std.squeeze()
 
     def _get_mvn(self, x_new, kp):
         """A utility to get the multivariate normal posterior given the GP
@@ -163,7 +147,8 @@ class GaussianProcess(ABC, MSONable):
         Parameters
         ----------
         x_new : jnp.ndarray
-            A set of points to condition the GP on.
+            A set of points to condition the GP on. As this is a "private"
+            method, it is assumed that x_new is already transformed.
 
         Returns
         -------
@@ -171,14 +156,15 @@ class GaussianProcess(ABC, MSONable):
             Two jnp.ndarrays for the mean and covariance matrix, respectively.
         """
 
-        x_new = self._forward_transform_input_as_mean(x_new)
-        x, y, y_std = self._get_transformed_data()
-
         f = self.kernel.kernel
         kp = deepcopy(kp)  # Kernel params
 
         k_noise = kp.pop("k_noise")
         k_jitter = kp.pop("k_jitter")
+
+        x = self.x_transformed
+        y = self.y_transformed
+        y_std = self.y_std_transformed
 
         k_pX = f(x_new, x, apply_noise=False, **kp)
         if not self.observation_noise:
@@ -201,9 +187,9 @@ class GaussianProcess(ABC, MSONable):
 
     def _sample(self, rng_key, x_new, kernel_params, n):
         """Execute random samples over the GP for an explicit set of kernel
-        parameters."""
+        parameters. As this is a "private" method, it is assumed x_new is
+        already transformed."""
 
-        x_new = self._forward_transform_input_as_mean(x_new)
         kernel_params = {**self.kernel.kernel_params, **kernel_params}
         mean, cov = self._get_mvn(x_new, kp=kernel_params)
         sampled = dist.MultivariateNormal(mean, cov).sample(
@@ -212,7 +198,9 @@ class GaussianProcess(ABC, MSONable):
         return sampled
 
     def _sample_unconditioned_prior(self, rng_key, x_new):
-        x_new = self._forward_transform_input_as_mean(x_new)
+        """As this is a "private" method, it is assumed x_new is already
+        transformed."""
+
         gp_samples = self.gp_samples
         samples = Predictive(self._model, num_samples=gp_samples)(
             rng_key, x_new
@@ -222,14 +210,16 @@ class GaussianProcess(ABC, MSONable):
         return samples
 
     def _sample_conditioned_prior(self, rng_key, x_new):
-        x_new = self._forward_transform_input_as_mean(x_new)
+        """As this is a "private" method, it is assumed x_new is already
+        transformed."""
+
         f = self.kernel.sample_parameters
         samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
         predictive = jax.vmap(
             lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
         )
         keys = jrp.split(rng_key, self.hp_samples)
-        sampled = predictive((keys, samples))
+        sampled = jnp.array(predictive((keys, samples)))
         return {**samples, "y": sampled}
 
     @abstractmethod
@@ -260,7 +250,8 @@ class GaussianProcess(ABC, MSONable):
         rng_key : int
             Key for seeding the random number generator.
         x_new : array_like
-            The input grid to sample on.
+            The input grid to sample on. Note that this is a "public" method
+            and as such it is assumed x_new is _not_ transformed.
 
         Returns
         -------
@@ -268,10 +259,12 @@ class GaussianProcess(ABC, MSONable):
             A dictionary containing all of the samples over the hyperparameters
             and observations. The observations in particular are of the shape
             (hp_samples, gp_samples, X_new.shape[0]) array corresponding to the
-            sampled results.
+            sampled results. The resulting values for "y" will be reverse
+            transformed back to the original space, but the values for the
+            kernel parameters will not be.
         """
 
-        x_new = self._forward_transform_input_as_mean(x_new)
+        x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
         if self.x is None and self.y is None:
             samples = self._sample_unconditioned_prior(rng_key, x_new)
@@ -282,15 +275,8 @@ class GaussianProcess(ABC, MSONable):
 
         # Inverse transform the samples
         y = samples["y"]
-        original_y_shape = y.shape
-        y = y.reshape(-1, y.shape[-1])
-
-        y = Array(y)
-        y.metadata.is_transformed = True
-        y.metadata.transforms_as = "mean"
-        y = self.output_transform.reverse(y).reshape(*original_y_shape)
-
-        samples["y"] = np.array(y)
+        y = self.output_transform.reverse(y, transforms_as="mean").squeeze()
+        samples["y"] = jnp.array(y)
 
         return samples
 
@@ -302,7 +288,8 @@ class GaussianProcess(ABC, MSONable):
         rng_key : int
             Key for seeding the random number generator.
         x_new : array_like
-            The input grid to find the mean and variance predictions on.
+            The input grid to find the mean and variance predictions on. As
+            this is a "public" method, x_new should _not_ be transformed.
 
         Returns
         -------
@@ -310,20 +297,11 @@ class GaussianProcess(ABC, MSONable):
         predictions evaluated on the grid x_new.
         """
 
-        x_new = self._forward_transform_input_as_mean(x_new)
+        # Note that samples here takes care of the transformations
+        # samples actualy returns transformed results already
         samples = self.sample(rng_key, x_new)
         y = samples["y"]
-        mean, std = jnp.mean(y, axis=[0, 1]), jnp.std(y, axis=[0, 1])
-
-        mean = Array(mean)
-        mean.metadata.transforms_as = "mean"
-        mean = self.output_transform.reverse(mean).squeeze()
-
-        std = Array(std)
-        std.metadata.transforms_as = "std"
-        std = self.output_transform.reverse(std).squeeze()
-
-        return mean, std
+        return jnp.mean(y, axis=[0, 1]), jnp.std(y, axis=[0, 1])
 
 
 @define
@@ -378,14 +356,13 @@ class ExactGP(GaussianProcess):
             progress_bar=progress_bar,
             jit_model_args=False,
         )
-        x, y, _ = self._get_transformed_data()
+        x, y = self.x_transformed, self.y_transformed
         self.mcmc.run(rng_key, x, y, **mcmc_run_kwargs)
         if print_summary:
             self.mcmc.print_summary()
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
-        x_new = self._forward_transform_input_as_mean(x_new)
         samples = self.mcmc.get_samples(group_by_chain=False)
         chain_length = len(next(iter(samples.values())))
         predictive = jax.vmap(
@@ -400,9 +377,7 @@ class ExactGP(GaussianProcess):
 class VariationalInferenceGP(GaussianProcess):
     guide_factory = field(default=AutoNormal)
     svi = field(default=None)
-    optimizer_factory = field(
-        default=partial(numpyro.optim.Adam, step_size=1e-3, b1=0.5)
-    )
+    optimizer_factory = field(default=numpyro.optim.Adam)
     loss_factory = field(default=Trace_ELBO)
     kernel_params = field(default=None)
 
@@ -413,17 +388,28 @@ class VariationalInferenceGP(GaussianProcess):
             spaces = " " * (15 - len(k))
             print(k, spaces, jnp.around(vals, 4))
 
-    def fit(self, rng_key, num_steps, progress_bar=True, print_summary=True):
-        optim = self.optimizer_factory()
+    def fit(
+        self,
+        rng_key,
+        num_steps,
+        progress_bar=True,
+        print_summary=True,
+        step_size=1e-3,
+        b1=0.5,
+        **optimizer_kwargs,
+    ):
+        optim = self.optimizer_factory(
+            step_size=step_size, b1=b1, **optimizer_kwargs
+        )
         guide = self.guide_factory(self._model)
         loss = self.loss_factory()
-        self = SVI(
+        self.svi = SVI(
             self._model,
             guide=guide,
             optim=optim,
             loss=loss,
         )
-        x, y, _ = self._get_transformed_data()
+        x, y = self.x_transformed, self.y_transformed
         self.kernel_params = self.svi.run(
             rng_key, num_steps, progress_bar=progress_bar, x=x, y=y
         )
@@ -432,7 +418,6 @@ class VariationalInferenceGP(GaussianProcess):
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
-        x_new = self._forward_transform_input_as_mean(x_new)
         kernel_params = self.svi.guide.median(self.kernel_params.params)
         samples = self._sample(rng_key, x_new, kernel_params, self.gp_samples)
         samples = samples.reshape(1, samples.shape[0], samples.shape[1])
@@ -444,11 +429,15 @@ class VariationalInferenceGP(GaussianProcess):
         # the data is provided. SVI is special in that there is only the
         # median kernel parameters to consider
 
-        x_new = self._forward_transform_input_as_mean(x_new)
+        if not self._is_fit:
+            # sample will transform x_new for us
+            return super().sample(rng_key, x_new)
 
-        if self._is_fit:
-            kernel_params = self.svi.guide.median(self.kernel_params.params)
-            mean, cov = self._get_mvn(x_new, kernel_params)
-            return mean, cov.diagonal()
-
-        return super().sample(rng_key, x_new)
+        # here the transforms need to be applied
+        x_new = self.input_transform.forward(x_new, transforms_as="mean")
+        kernel_params = self.svi.guide.median(self.kernel_params.params)
+        mean, cov = self._get_mvn(x_new, kernel_params)
+        std = jnp.sqrt(cov.diagonal())
+        mean = self.output_transform.reverse(mean, transforms_as="mean")
+        std = self.output_transform.reverse(std, transforms_as="std")
+        return mean.squeeze(), std.squeeze()
