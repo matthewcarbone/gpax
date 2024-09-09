@@ -110,7 +110,7 @@ class ScaleTransform(Transform):
     def _forward_std(self, x):
         delta_r = self.maxima - self.minima + EPSILON
         delta_t = self.tmax - self.tmin
-        return x / delta_r * delta_t + self.tmin
+        return x / delta_r * delta_t
 
     def _reverse_mean(self, x):
         delta_r = self.maxima - self.minima + EPSILON
@@ -121,7 +121,7 @@ class ScaleTransform(Transform):
     def _reverse_std(self, x):
         delta_r = self.maxima - self.minima + EPSILON
         delta_t = self.tmax - self.tmin + EPSILON
-        return delta_r * (x - self.tmin) / delta_t
+        return x * delta_r / delta_t
 
 
 @define
