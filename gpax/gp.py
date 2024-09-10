@@ -10,7 +10,7 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from functools import partial
+from warnings import warn
 
 import jax
 import jax.numpy as jnp
@@ -69,12 +69,14 @@ class GaussianProcess(ABC, MSONable):
         factory=ScaleTransform, validator=instance_of((Transform, type(None)))
     )
     output_transform = field(
-        factory=ScaleTransform,
+        factory=IdentityTransform,
         validator=instance_of((Transform, type(None))),
     )
+    verbose = field(default=0, validator=instance_of(int))
+    metadata = field(factory=dict)
     _is_fit = field(default=False, validator=instance_of(bool))
 
-    def _model(self, x, y=None):
+    def _gp_prior(self, x, y=None):
         """The simple GP model. This is of course meant to be used with the
         appropriate numpyro primitives and in general not called directly.
 
@@ -98,10 +100,13 @@ class GaussianProcess(ABC, MSONable):
     def sample(self): ...
 
     @abstractmethod
-    def fit(self): ...
+    def fit(self, rng_key): ...
 
     def __attrs_pre_init__(self):
         clear_cache()
+
+    def _class_specific_post_init(self):
+        pass
 
     def _fit_transforms(self):
         # This works even if x and y are None
@@ -109,20 +114,27 @@ class GaussianProcess(ABC, MSONable):
         self.output_transform.fit(self.y)
 
     def __attrs_post_init__(self):
-        if isinstance(self.y_std, (float, int)):
-            self.y_std = jnp.ones(self.y_std.shape) * self.y_std
+        # Check the status of y_std
+        if self.x is None and self.y_std is not None:
+            raise ValueError("y_std cannot be set if no x or y data is given")
+
+        # Assign y_std correcly if necessary
+        if self.y is not None and isinstance(self.y_std, (float, int)):
+            self.y_std = jnp.ones(self.y.shape) * self.y_std
 
         # Assign everything as Array objects to keep track of transformations
         if (self.y is None) ^ (self.x is None):
             raise ValueError("x and y must either both be None or not")
 
-        if self.input_transform is None:
+        # Set to identity transform in certain cases
+        if self.input_transform is None or self.x is None:
             self.input_transform = IdentityTransform()
-        if self.output_transform is None:
+        if self.output_transform is None or self.y is None:
             self.output_transform = IdentityTransform()
 
         # Fit the transformation objects on all provided data
         self._fit_transforms()
+        self._class_specific_post_init()
 
     @property
     def x_transformed(self):
@@ -140,9 +152,43 @@ class GaussianProcess(ABC, MSONable):
             return None
         return y_std.squeeze()
 
-    def _get_mvn(self, x_new, kp):
+    def _get_mean_and_covariance_unconditioned(self, x_new, kp):
+        """A utility to get the multivariate normal prior given the GP mean
+        function (which for now is just 0) and the pre-set kernel parameter
+        priors.
+
+        Parameters
+        ----------
+        x_new : jnp.ndarray
+            A set of points to condition the GP on. As this is a "private"
+            method, it is assumed that x_new is already transformed.
+
+        Returns
+        -------
+        tuple
+            Two jnp.ndarrays for the mean and covariance matrix, respectively.
+        """
+
+        # TODO: eventually reincorporate the mean function functionality
+        mean = jnp.zeros(x_new.shape[0])
+
+        f = self.kernel.kernel
+        kp = deepcopy(kp)  # Kernel params
+
+        k_noise = kp.pop("k_noise")
+        k_jitter = kp.pop("k_jitter")
+
+        if not self.observation_noise:
+            noise = self.observation_noise
+        else:
+            noise = k_noise
+        cov = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
+
+        return mean, cov
+
+    def _get_mean_and_covariance(self, x_new, kp):
         """A utility to get the multivariate normal posterior given the GP
-        and a new set of data to condition on.
+        and the training set of data to condition on.
 
         Parameters
         ----------
@@ -185,42 +231,69 @@ class GaussianProcess(ABC, MSONable):
         mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y_residual))
         return mean, cov
 
-    def _sample(self, rng_key, x_new, kernel_params, n):
+    def _sample(self, rng_key, x_new, kernel_params, n, condition_on_data=True):
         """Execute random samples over the GP for an explicit set of kernel
         parameters. As this is a "private" method, it is assumed x_new is
         already transformed."""
 
+        # Revert to the prior distribution if no updated kernel parameters
+        # are provided
         kernel_params = {**self.kernel.kernel_params, **kernel_params}
-        mean, cov = self._get_mvn(x_new, kp=kernel_params)
+        if condition_on_data:
+            mean, cov = self._get_mean_and_covariance(x_new, kp=kernel_params)
+        else:
+            mean, cov = self._get_mean_and_covariance_unconditioned(
+                x_new, kp=kernel_params
+            )
         sampled = dist.MultivariateNormal(mean, cov).sample(
             rng_key, sample_shape=(n,)
         )
         return sampled
 
+    def _sample_prior(self, rng_key, x_new, condition_on_data):
+        f = self.kernel.sample_parameters
+        hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
+        predictive = jax.vmap(
+            lambda p: self._sample(
+                p[0],
+                x_new,
+                p[1],
+                self.gp_samples,
+                condition_on_data=condition_on_data,
+            )
+        )
+        keys = jrp.split(rng_key, self.hp_samples)
+        sampled = jnp.array(predictive((keys, hp_samples)))
+        return {**hp_samples, "y": sampled}
+
     def _sample_unconditioned_prior(self, rng_key, x_new):
         """As this is a "private" method, it is assumed x_new is already
         transformed."""
 
-        gp_samples = self.gp_samples
-        samples = Predictive(self._model, num_samples=gp_samples)(
-            rng_key, x_new
-        )
-        n = samples["y"].shape[-1]
-        samples["y"] = samples["y"].reshape(-1, 1, n)
-        return samples
+        return self._sample_prior(rng_key, x_new, False)
+
+        # gp_samples = self.gp_samples
+        # samples = Predictive(self._gp_prior, num_samples=gp_samples)(
+        #     rng_key, x_new
+        # )
+        # n = samples["y"].shape[-1]
+        # samples["y"] = samples["y"].reshape(-1, 1, n)
+        # return samples
 
     def _sample_conditioned_prior(self, rng_key, x_new):
         """As this is a "private" method, it is assumed x_new is already
         transformed."""
 
-        f = self.kernel.sample_parameters
-        samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
-        predictive = jax.vmap(
-            lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
-        )
-        keys = jrp.split(rng_key, self.hp_samples)
-        sampled = jnp.array(predictive((keys, samples)))
-        return {**samples, "y": sampled}
+        return self._sample_prior(rng_key, x_new, True)
+
+        # f = self.kernel.sample_parameters
+        # hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
+        # predictive = jax.vmap(
+        #     lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
+        # )
+        # keys = jrp.split(rng_key, self.hp_samples)
+        # sampled = jnp.array(predictive((keys, hp_samples)))
+        # return {**hp_samples, "y": sampled}
 
     @abstractmethod
     def _sample_posterior(self): ...
@@ -275,7 +348,7 @@ class GaussianProcess(ABC, MSONable):
 
         # Inverse transform the samples
         y = samples["y"]
-        y = self.output_transform.reverse(y, transforms_as="mean").squeeze()
+        y = self.output_transform.reverse(y, transforms_as="mean")
         samples["y"] = jnp.array(y)
 
         return samples
@@ -307,59 +380,36 @@ class GaussianProcess(ABC, MSONable):
 @define
 class ExactGP(GaussianProcess):
     mcmc = field(default=None)
+    num_warmup = field(default=2000, validator=[instance_of(int), gt(0)])
+    num_chains = field(default=1, validator=[instance_of(int), gt(0)])
+    chain_method = field(default="sequential", validator=instance_of(str))
+    mcmc_run_kwargs = field(factory=dict)
 
-    def fit(
-        self,
-        rng_key,
-        num_warmup=2000,
-        num_samples=2000,
-        num_chains=1,
-        chain_method="sequential",
-        progress_bar=True,
-        print_summary=True,
-        **mcmc_run_kwargs: float,
-    ):
+    def fit(self, rng_key):
         """Runs Hamiltonian Monte Carlo to infer the GP parameters.
 
         Parameters
         ----------
         rng_key : int
             Random number generator key.
-
-
-        Args:
-            rng_key: random number generator key
-            X: 2D feature vector
-            y: 1D target vector
-            num_warmup: number of HMC warmup states
-            num_samples: number of HMC samples
-            num_chains: number of HMC chains
-            chain_method: 'sequential', 'parallel' or 'vectorized'
-            progress_bar: show progress bar
-            print_summary: print summary at the end of sampling
-            device:
-                optionally specify a cpu or gpu device on which to run the inference;
-                e.g., ``device=jax.devices("cpu")[0]``
-            **jitter:
-                Small positive term added to the diagonal part of a covariance
-                matrix for numerical stability (Default: 1e-6)
         """
 
         init_strategy = init_to_median(num_samples=10)
-        kernel = NUTS(self._model, init_strategy=init_strategy)
+        kernel = NUTS(self._gp_prior, init_strategy=init_strategy)
         self.mcmc = MCMC(
             kernel,
-            num_warmup=num_warmup,
-            num_samples=num_samples,
-            num_chains=num_chains,
-            chain_method=chain_method,
-            progress_bar=progress_bar,
+            num_warmup=self.num_warmup,
+            num_samples=self.hp_samples,
+            num_chains=self.num_chains,
+            chain_method=self.chain_method,
+            progress_bar=self.verbose > 0,
             jit_model_args=False,
         )
         x, y = self.x_transformed, self.y_transformed
-        self.mcmc.run(rng_key, x, y, **mcmc_run_kwargs)
-        if print_summary:
+        self.mcmc.run(rng_key, x, y, **self.mcmc_run_kwargs)
+        if self.verbose > 0:
             self.mcmc.print_summary()
+        self.metadata["fit_key"] = np.array(rng_key)
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
@@ -377,9 +427,12 @@ class ExactGP(GaussianProcess):
 class VariationalInferenceGP(GaussianProcess):
     guide_factory = field(default=AutoNormal)
     svi = field(default=None)
-    optimizer_factory = field(default=numpyro.optim.Adam)
     loss_factory = field(default=Trace_ELBO)
     kernel_params = field(default=None)
+    num_steps = field(default=100, validator=[instance_of(int), gt(0)])
+    optimizer_factory = field(default=numpyro.optim.Adam)
+    optimizer_kwargs = field(factory=dict)
+    hp_samples = field(default=1, validator=[instance_of(int), gt(0)])
 
     def _print_summary(self):
         params_map = self.svi.guide.median(self.kernel_params.params)
@@ -388,33 +441,31 @@ class VariationalInferenceGP(GaussianProcess):
             spaces = " " * (15 - len(k))
             print(k, spaces, jnp.around(vals, 4))
 
-    def fit(
-        self,
-        rng_key,
-        num_steps,
-        progress_bar=True,
-        print_summary=True,
-        step_size=1e-3,
-        b1=0.5,
-        **optimizer_kwargs,
-    ):
-        optim = self.optimizer_factory(
-            step_size=step_size, b1=b1, **optimizer_kwargs
-        )
-        guide = self.guide_factory(self._model)
+    def _class_specific_post_init(self):
+        if "b1" not in self.optimizer_kwargs:
+            self.optimizer_kwargs["b1"] = 0.5
+        if "step_size" not in self.optimizer_kwargs:
+            self.optimizer_kwargs["step_size"] = 1e-3
+        if self.hp_samples != 1:
+            warn(
+                f"hp_samples is set to {self.hp_samples} but will be "
+                "overridden to 1. In VariationalInferenceGP, only the "
+                "median value of the hyperparameters are used for predictions."
+            )
+            self.hp_samples = 1
+
+    def fit(self, rng_key):
+        optim = self.optimizer_factory(**self.optimizer_kwargs)
+        guide = self.guide_factory(self._gp_prior)
         loss = self.loss_factory()
-        self.svi = SVI(
-            self._model,
-            guide=guide,
-            optim=optim,
-            loss=loss,
-        )
+        self.svi = SVI(self._gp_prior, guide=guide, optim=optim, loss=loss)
         x, y = self.x_transformed, self.y_transformed
         self.kernel_params = self.svi.run(
-            rng_key, num_steps, progress_bar=progress_bar, x=x, y=y
+            rng_key, self.num_steps, progress_bar=self.verbose > 0, x=x, y=y
         )
-        if print_summary:
+        if self.verbose > 0:
             self._print_summary()
+        self.metadata["fit_key"] = np.array(rng_key)
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
@@ -430,13 +481,16 @@ class VariationalInferenceGP(GaussianProcess):
         # median kernel parameters to consider
 
         if not self._is_fit:
-            # sample will transform x_new for us
-            return super().sample(rng_key, x_new)
+            # sample will transform x_new for us as well as the samples
+            # themselves
+            sampled = super().sample(rng_key, x_new)
+            y = sampled["y"]
+            return y.mean(axis=[0, 1]), y.std(axis=[0, 1])
 
         # here the transforms need to be applied
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
         kernel_params = self.svi.guide.median(self.kernel_params.params)
-        mean, cov = self._get_mvn(x_new, kernel_params)
+        mean, cov = self._get_mean_and_covariance(x_new, kernel_params)
         std = jnp.sqrt(cov.diagonal())
         mean = self.output_transform.reverse(mean, transforms_as="mean")
         std = self.output_transform.reverse(std, transforms_as="std")

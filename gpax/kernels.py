@@ -8,16 +8,13 @@ Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
-# import math
-
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
+from attrs import define, field
+from attrs.validators import gt, instance_of
 from jax import jit
 from monty.json import MSONable
-
-# def _sqrt(x, eps=1e-12):
-#     return jnp.sqrt(x + eps)
 
 
 def _add_jitter(x, jitter=1e-6):
@@ -97,13 +94,28 @@ def get_parameter_as_float(parameter):
     return parameter
 
 
+@define
 class Kernel(MSONable):
-    def __init__(self, k_noise=0.0, k_jitter=1e-6):
-        self.k_noise = k_noise
-        self.k_jitter = k_jitter
+    k_noise = field(
+        default=dist.LogNormal(0.0, 1.0),
+        validator=instance_of((dist.Distribution, int, float)),
+    )
+    k_jitter = field(default=1e-6, validator=[instance_of(float), gt(0.0)])
 
 
+@define
 class RBFKernel(Kernel):
+    k_scale = field(
+        default=dist.LogNormal(0.0, 1.0),
+        validator=instance_of((dist.Distribution, int, float)),
+    )
+    k_scale_dims = field(default=1, validator=[instance_of(int), gt(0)])
+    k_length = field(
+        default=dist.LogNormal(0.0, 1.0),
+        validator=instance_of((dist.Distribution, int, float)),
+    )
+    k_length_dims = field(default=1, validator=[instance_of(int), gt(0)])
+
     @property
     def kernel_params(self):
         return {
@@ -112,21 +124,6 @@ class RBFKernel(Kernel):
             "k_noise": self.k_noise,
             "k_jitter": self.k_jitter,
         }
-
-    def __init__(
-        self,
-        k_scale=dist.LogNormal(0.0, 1.0),
-        k_scale_dims=1,
-        k_length=dist.LogNormal(0.0, 1.0),
-        k_length_dims=1,
-        k_noise=dist.LogNormal(0.0, 1.0),
-        k_jitter=1e-6,
-    ):
-        super().__init__(k_noise=k_noise, k_jitter=k_jitter)
-        self.k_scale = k_scale
-        self.k_scale_dims = k_scale_dims
-        self.k_length = k_length
-        self.k_length_dims = k_length_dims
 
     @staticmethod
     @jit

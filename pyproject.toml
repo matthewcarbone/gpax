@@ -22,12 +22,13 @@ classifiers=[
 
 # Core dependencies
 dependencies = [
-    "jax>=0.4.8",
-    "numpyro>=0.11.0",
-    "dm-haiku>=0.0.5",
+    "jax>=0.4.31",
+    "numpyro>=0.15.2",
+    "dm-haiku>=0.0.12",
     "dunamai==1.19.2",
     "jaxopt",
     "monty",
+    "attrs",
 ]
 
 dynamic = ["version"]

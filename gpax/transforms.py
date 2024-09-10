@@ -95,9 +95,9 @@ class ScaleTransform(Transform):
 
     def fit(self, x):
         assert not self._is_fit
+        self._is_fit = True
         if x is None:
             return
-        self._is_fit = True
         self.minima = x.min(axis=0, keepdims=True)
         self.maxima = x.max(axis=0, keepdims=True)
 
