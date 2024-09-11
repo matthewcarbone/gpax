@@ -14,7 +14,7 @@ from warnings import warn
 
 import jax
 import jax.numpy as jnp
-import jax.random as jrp
+import jax.random as jra
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
@@ -100,7 +100,7 @@ class GaussianProcess(ABC, MSONable):
     def sample(self): ...
 
     @abstractmethod
-    def fit(self, rng_key): ...
+    def fit(self, key): ...
 
     def __attrs_pre_init__(self):
         clear_cache()
@@ -262,7 +262,7 @@ class GaussianProcess(ABC, MSONable):
                 condition_on_data=condition_on_data,
             )
         )
-        keys = jrp.split(rng_key, self.hp_samples)
+        keys = jra.split(rng_key, self.hp_samples)
         sampled = jnp.array(predictive((keys, hp_samples)))
         return {**hp_samples, "y": sampled}
 
@@ -291,14 +291,14 @@ class GaussianProcess(ABC, MSONable):
         # predictive = jax.vmap(
         #     lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
         # )
-        # keys = jrp.split(rng_key, self.hp_samples)
+        # keys = jra.split(rng_key, self.hp_samples)
         # sampled = jnp.array(predictive((keys, hp_samples)))
         # return {**hp_samples, "y": sampled}
 
     @abstractmethod
     def _sample_posterior(self): ...
 
-    def sample(self, rng_key, x_new):
+    def sample(self, key, x_new):
         """Runs samples over the GP. These samples are some combination of
         results from sampling over the prior (or posterior) distribution of
         hyperparameters, and sampling from a GP assuming fixed hyperparameters.
@@ -320,7 +320,7 @@ class GaussianProcess(ABC, MSONable):
 
         Parameters
         ----------
-        rng_key : int
+        key : int
             Key for seeding the random number generator.
         x_new : array_like
             The input grid to sample on. Note that this is a "public" method
@@ -336,6 +336,8 @@ class GaussianProcess(ABC, MSONable):
             transformed back to the original space, but the values for the
             kernel parameters will not be.
         """
+
+        rng_key = jra.key(key)
 
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
@@ -353,12 +355,12 @@ class GaussianProcess(ABC, MSONable):
 
         return samples
 
-    def predict(self, rng_key, x_new):
+    def predict(self, key, x_new):
         """Finds the mean and variance of the model via sampling.
 
         Parameters
         ----------
-        rng_key : int
+        key : int
             Key for seeding the random number generator.
         x_new : array_like
             The input grid to find the mean and variance predictions on. As
@@ -369,6 +371,8 @@ class GaussianProcess(ABC, MSONable):
         Two arrays, one for the mean, and the other for the variance of the
         predictions evaluated on the grid x_new.
         """
+
+        rng_key = jra.key(key)
 
         # Note that samples here takes care of the transformations
         # samples actualy returns transformed results already
@@ -385,14 +389,16 @@ class ExactGP(GaussianProcess):
     chain_method = field(default="sequential", validator=instance_of(str))
     mcmc_run_kwargs = field(factory=dict)
 
-    def fit(self, rng_key):
+    def fit(self, key):
         """Runs Hamiltonian Monte Carlo to infer the GP parameters.
 
         Parameters
         ----------
-        rng_key : int
+        key : int
             Random number generator key.
         """
+
+        rng_key = jra.key(key)
 
         init_strategy = init_to_median(num_samples=10)
         kernel = NUTS(self._gp_prior, init_strategy=init_strategy)
@@ -418,7 +424,7 @@ class ExactGP(GaussianProcess):
         predictive = jax.vmap(
             lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
         )
-        keys = jrp.split(rng_key, chain_length)
+        keys = jra.split(rng_key, chain_length)
         sampled = predictive((keys, samples))
         return {**samples, "y": sampled}
 
@@ -454,7 +460,8 @@ class VariationalInferenceGP(GaussianProcess):
             )
             self.hp_samples = 1
 
-    def fit(self, rng_key):
+    def fit(self, key):
+        rng_key = jra.key(key)
         optim = self.optimizer_factory(**self.optimizer_kwargs)
         guide = self.guide_factory(self._gp_prior)
         loss = self.loss_factory()
@@ -475,7 +482,7 @@ class VariationalInferenceGP(GaussianProcess):
         kernel_params["y"] = samples
         return kernel_params
 
-    def predict(self, rng_key, x_new):
+    def predict(self, key, x_new):
         # Override the default sampling behavior if the model is fit and
         # the data is provided. SVI is special in that there is only the
         # median kernel parameters to consider
@@ -483,9 +490,17 @@ class VariationalInferenceGP(GaussianProcess):
         if not self._is_fit:
             # sample will transform x_new for us as well as the samples
             # themselves
-            sampled = super().sample(rng_key, x_new)
+            sampled = super().sample(key, x_new)
             y = sampled["y"]
             return y.mean(axis=[0, 1]), y.std(axis=[0, 1])
+
+        if key is not None:
+            warn(
+                "Unless the model is not fit, a random number is not "
+                "used during predict for VariationalInferenceGP, as only "
+                "the median value of the kernels are used for prediction. "
+                "Provided key will be ignored."
+            )
 
         # here the transforms need to be applied
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
