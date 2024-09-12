@@ -9,13 +9,11 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
 from abc import ABC, abstractmethod
-from functools import wraps
 from typing import Callable
-from warnings import warn
 
 import jax.numpy as jnp
-import jax.random as jra
-import jaxopt
+
+# import jaxopt
 import numpy as np
 import numpyro.distributions as dist
 from attrs import define, field
@@ -29,95 +27,7 @@ from gpax.utils import split_array
 DATA_TYPES = [jnp.ndarray, np.ndarray]
 
 
-def expected_improvement(mean, variance, y_max):
-    """Expected Improvement acquisition function.
-
-    Parameters
-    ----------
-    mean, variance : array_like
-        The predictive mean (variance) at some point or set of points.
-    y_max : float
-        The current largest value observed by the model.
-
-    Returns
-    -------
-    jnp.ndarray
-    """
-
-    sigma = jnp.sqrt(variance)
-    u = (mean - y_max) / sigma
-    normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
-    ucdf = normal.cdf(u)
-    updf = jnp.exp(normal.log_prob(u))
-    acq = sigma * (updf + u * ucdf)
-    return acq
-
-
-def upper_confidence_bound(mean, variance, beta=0.25):
-    """Upper Confidence Bound acquisition function.
-
-    Parameters
-    ----------
-    mean, variance : array_like
-        The predictive mean (variance) at some point or set of points.
-    beta : float
-        Coefficient for balancing the exploration-exploitation tradeoff. If
-        beta is set to float("inf") or similar, upper_confidence_bound
-        reduces to pure uncertainty-based exploration.
-
-    Returns
-    -------
-    jnp.ndarray
-    """
-
-    if bool(jnp.isinf(beta)):
-        return jnp.sqrt(variance)
-
-    return mean + jnp.sqrt(beta * variance)
-
-
-def probability_of_improvement(mean, variance, best_f=None, xi=0.01):
-    """Probability of Improvement acquisition function.
-
-    Parameters
-    ----------
-    mean, variance : array_like
-        The predictive mean (variance) at some point or set of points.
-    best_f : float, optional
-        Best function value observed so far. Derived from the predictive mean
-        when not provided.
-    xi : float
-        Balances the exploration-exploitation tradeoff.
-
-    Returns
-    -------
-    jnp.ndarray
-    """
-
-    if best_f is None:
-        best_f = mean.max()
-    sigma = jnp.sqrt(variance)
-    u = (mean - best_f - xi) / sigma
-    normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
-    return normal.cdf(u)
-
-
-# def optimize_call_processing(fn):
-#     @wraps(fn)
-#     def inner(rng_key, x, **kwargs):
-#         shape = x.shape
-#         if x.ndim > 2:
-#             x = x.reshape(-1, x.shape[-1])
-#         response = fn(rng_key, x, **kwargs)
-#         if hasattr(response, "__len__"):
-#             response = [y.reshape(shape[:-1]) for y in response]
-#         else:
-#             response = response.reshape(shape[:-1])
-#         return response
-#     return inner
-
-
-def x_shape_value_error_message(x, desired_dims):
+def x_shape_err_msg(x, desired_dims):
     return f"""
     x provided is of shape {x.shape} but must have {len(desired_dims)}
     dimensions each representing: {desired_dims}. Note that in general,
@@ -140,6 +50,7 @@ class AcquisitionFunction(ABC, MSONable):
     )
     verbose = field(default=0, validator=[instance_of(int), ge(0)])
     batch_threshold = field(default=100, validator=[instance_of(int), gt(0)])
+    force_monte_carlo = field(default=False, validator=instance_of(bool))
 
     def __attrs_post_init__(self):
         # The shape of bounds should always be two rows by as many columns
@@ -148,27 +59,133 @@ class AcquisitionFunction(ABC, MSONable):
         assert self.bounds.ndim == 2
         assert self.bounds.shape[0] == 2
 
+    def _get_integrand_samples(self, key, model, x):
+        """Gets samples from the integrand given an array of shape (N, q, d)
+        and returns only the observation values in the shape
+        (hp_samples x gp_samples, N, q)."""
+
+        N = x.shape[0]
+        d = x.shape[2]
+
+        # samples is always of shape (hp_samples, gp_samples, N x q)
+        samples = model.sample(key, x.reshape(-1, d))
+        samples = samples["y"].reshape(-1, N, self.q)
+        return samples
+
+    @abstractmethod
+    def integrand(self, key, model, x):
+        """The integrand of the acquisition function in integral form. See
+        Wilson et al. (https://arxiv.org/abs/1712.00424). Specifically, this
+        is the vale for h in Eq. (1). Note that this is only used and required
+        for Monte Carlo acquisition (q>1). The integrand should return a
+        shape of (N_MC_samples x )"""
+
+        raise NotImplementedError
+
+    def analytic(self, key, model, x):
+        """Returns the analytic form of the acquisition function evaluated at
+        point x. Note that by default, this will raise a NotImplementedError,
+        and the analytic form of the acquisition function, for q=1 only, must
+        be defined in a child class. Note that since this method is only used
+        for q=1, the input is expected to be of shape (N, d), not (N, 1, d).
+        """
+
+        raise NotImplementedError(
+            f"Acquisition function {self.__class__.__name__} does not have an "
+            "analytic acquisition function defined"
+        )
+
+    def _monte_carlo_evaluation(self, key, model, x):
+        """Executes the evaluation of the monte carlo sampling procedure given
+        design point x."""
+
+        if x.ndim == 2 and self.q == 1:
+            x = x.reshape(x.shape[0], 1, x.shape[1])
+
+        if x.ndim != 3 or x.shape[1] != self.q:
+            raise ValueError(x_shape_err_msg(x, ("N", "q", "d")))
+
+        # Get the value of the integrand, h, evaluated for many samples of
+        # the GP
+        h = self.integrand(key, model, x)
+
+        # Return the average over samples of the GP
+        return h.mean(axis=0)
+
+    def _analytic_evaluation(self, key, model, x):
+        if self.q > 1:
+            raise ValueError("Cannot evaluate analytic expression for q!=1")
+
+        if x.ndim == 3 and x.shape[1] == 1:
+            x = x.reshape(x.shape[0], x.shape[1])
+
+        if x.ndim != 2:
+            raise ValueError(x_shape_err_msg(x, ("N", "d")))
+
+        return self.analytic(key, model, x)
+
     def __call__(self, key, model, x):
-        """When calling the acquisition function, it will evaluate the input
-        x at every point provided. Generically, the input can be of arbitrary
-        shape, and will be reshaped automatically. However, the last axis
-        of the input must be equal to the input dimension of the GP model."""
-        warn("This is a dummy __call__ instance!")
+        """Produces the value of the acquisition function evaluated at point
+        x.
+
+        Parameters
+        ----------
+        key : int
+            The random state for the optimization.
+        model : gpax.gp.GaussianProcess
+            A GaussianProcess instance.
+        x : array_like
+            The input array specifying the points to evaluate the acquisition
+            function at. Generally, x should be of shape (N, q, d). If an
+            input is provided with x.ndim == 3, this will be the assumption.
+            If an input is provided with x.ndim == 2 and q == 1, it will be
+            reshaped to (N, 1, d) if force_monte_carlo is set to True. If
+            x.ndim == 2 and q > 1, an error will be raised.
+                In the case where q == 1, and an analytic expression for the
+            acquisition function is available, the expected input shape is
+            (N, d). However, if an input of shape (N, 1, d) is provided, it
+            is valid and will be reshaped accordingly.
+
+        Returns
+        -------
+        An array of shape N, consisting of the values of the acquisition
+        function at the provided points.
+        """
 
         x = jnp.array(x)
-        if x.ndim != 2:
-            raise ValueError(x_shape_value_error_message(x, ("N", "d")))
-        mu, _ = model.predict(key, x)
-        return mu
 
-    def optimize_halton(self, key, model, n_samples=1000):
+        if self.force_monte_carlo or self.q > 1:
+            return self._monte_carlo_evaluation(key, model, x)
+
+        return self._analytic_evaluation(key, model, x)
+
+    def _optimize_halton(self, key, model, n_samples):
         """Optimizes the acquisition function using Halton random
-        sampling/Monte Carlo."""
+        sampling/Monte Carlo.
+
+        Parameters
+        ----------
+        key : int
+            The random state for the optimization.
+        model : gpax.gp.GaussianProcess
+            A GaussianProcess instance.
+        n_samples : int
+            The number of random Halton samples to draw during the optimization.
+            Precisely, it's actually n_samples x q.
+
+        Returns
+        -------
+        The q x d array containing the optimal sampled points, as well as the
+        value of the acquisition function at the sampled point.
+        """
 
         halton = qmc.Halton(d=self.bounds.shape[1] * self.q, seed=key)
         samples = halton.random(n=n_samples)
         l_bounds = self.bounds[0, :].squeeze().tolist()
         u_bounds = self.bounds[1, :].squeeze().tolist()
+        if self.verbose > 0:
+            quality = qmc.discrepancy(samples)
+            print(f"qmc discrepancy (sample quality index) = {quality:.02e}")
         samples = qmc.scale(samples, l_bounds, u_bounds)
         samples = samples.reshape(n_samples, self.q, -1)
         samples_split = split_array(samples, s=self.batch_threshold)
@@ -178,15 +195,18 @@ class AcquisitionFunction(ABC, MSONable):
         for xx in tqdm(samples_split, disable=not verbose):
             # Note that self.__call__ calls sample, and sample executes all
             # necessary transforms on the data
-            vals.append(self(jra.key(key), model, xx))
+            vals.append(self.__call__(key, model, xx))
         vals = jnp.array(vals).flatten()
         argmax = vals.argmax()
 
         return samples[argmax, ...], vals[argmax].item()
 
-        if self.verbose > 0:
-            quality = qmc.discrepancy(sample)
-            print(f"qmc discrepancy (sample quality index) = {quality}")
+    def optimize(self, key, model, n, method="halton"):
+        method = method.lower()
+        if method == "halton":
+            return self._optimize_halton(key, model, n)
+        else:
+            raise ValueError(f"Unknown optimizer {method}")
 
     # def optimize(self, rng_key, n_initial=100):
     #     """Optimizes the provided acquisition function"""
@@ -211,29 +231,55 @@ class AcquisitionFunction(ABC, MSONable):
 
 
 @define
-class qUpperConfidenceBound(AcquisitionFunction):
+class UpperConfidenceBound(AcquisitionFunction):
+    """The upper confidence bound acquisition function (UCB). UCB strikes a
+    balance between exploration and exploitation via parameter beta. Note that
+    if beta == inf, UCB reduces to the MaximumVariance acquisition function."""
+
     beta = field(default=10.0, validator=[instance_of((int, float)), ge(0.0)])
 
-    def __call__(self, rng_key, model, x):
-        """UCB call function. x should be of shape (N, q, d), where N is the
-        number of evaluation points to consider."""
+    def analytic(self, key, model, x):
+        mean, std = model.predict(key, x)
+        if bool(jnp.isinf(self.beta)):
+            return std
+        return mean + jnp.sqrt(self.beta) * std
 
-        x = jnp.array(x)
-        if x.ndim != 3 or x.shape[1] != self.q:
-            raise ValueError(x_shape_value_error_message(x, ("N", "q", "d")))
-        N = x.shape[0]
-        d = x.shape[2]
-
-        # samples is always of shape (hp_samples, gp_samples, N x q)
-        samples = model.sample(rng_key, x.reshape(-1, d))
-        samples = samples["y"].reshape(-1, N, self.q)
+    def integrand(self, key, model, x):
+        samples = self._get_integrand_samples(key, model, x)
         mean = samples.mean(axis=0, keepdims=True)
+        if bool(jnp.isinf(self.beta)):
+            return jnp.abs(samples - mean).max(axis=-1)
         beta_prime = jnp.sqrt(self.beta * np.pi / 2.0)
-        integrand = mean + beta_prime * jnp.abs(samples - mean)
+        return (mean + beta_prime * jnp.abs(samples - mean)).max(axis=-1)
 
-        # Evaluate the max over the q axis, producing a
-        # (hp_samples x gp_samples, N) array
-        evaluate_max = integrand.max(axis=-1)
 
-        # Return the average over samples of the GP
-        return evaluate_max.mean(axis=0)
+@define
+class ExpectedImprovement(AcquisitionFunction):
+    def analytic(self, key, model, x):
+        mean, std = model.predict(key, x)
+        y_max = model.y.max()
+        u = (mean - y_max) / std
+        normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
+        ucdf = normal.cdf(u)
+        updf = jnp.exp(normal.log_prob(u))
+        acq = std * (updf + u * ucdf)
+        return acq
+
+    def integrand(self, key, model, x):
+        samples = self._get_integrand_samples(key, model, x)
+        y_max = model.y.max()
+        f_max_over_q = samples.max(axis=-1)
+        where_gt_0 = f_max_over_q > 0
+        return (f_max_over_q - y_max) * where_gt_0
+
+
+# @define
+# class ProbabilityOfImprovement(AcquisitionFunction):
+#     def analytic(self, key, model, x):
+#         if best_f is None:
+#             best_f = mean.max()
+#         sigma = jnp.sqrt(variance)
+#         u = (mean - y_max - xi) / sigma
+#         normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
+#         return normal.cdf(u)
+#

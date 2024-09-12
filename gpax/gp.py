@@ -337,7 +337,10 @@ class GaussianProcess(ABC, MSONable):
             kernel parameters will not be.
         """
 
-        rng_key = jra.key(key)
+        if isinstance(key, int):
+            rng_key = jra.key(key)
+        else:
+            rng_key = key
 
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
