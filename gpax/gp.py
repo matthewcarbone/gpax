@@ -31,6 +31,7 @@ from numpyro.infer import (
 )
 from numpyro.infer.autoguide import AutoNormal
 
+from gpax import state
 from gpax.kernels import Kernel
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
 
@@ -343,6 +344,7 @@ class GaussianProcess(ABC, MSONable):
             rng_key = key
 
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
+        x_new = jax.device_put(x_new, state.device)
 
         if self.x is None and self.y is None:
             samples = self._sample_unconditioned_prior(rng_key, x_new)
@@ -354,7 +356,9 @@ class GaussianProcess(ABC, MSONable):
         # Inverse transform the samples
         y = samples["y"]
         y = self.output_transform.reverse(y, transforms_as="mean")
-        samples["y"] = jnp.array(y)
+        y = jnp.array(y)
+        y = jax.device_put(y, jax.devices("cpu")[0])
+        samples["y"] = y
 
         return samples
 
@@ -415,6 +419,8 @@ class ExactGP(GaussianProcess):
             jit_model_args=False,
         )
         x, y = self.x_transformed, self.y_transformed
+        x = jax.device_put(x, state.device)
+        y = jax.device_put(y, state.device)
         self.mcmc.run(rng_key, x, y, **self.mcmc_run_kwargs)
         if self.verbose > 0:
             self.mcmc.print_summary()
