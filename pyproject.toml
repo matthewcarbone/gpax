@@ -8,9 +8,9 @@ authors = [
     {"name" = "Maxim Ziatdinov", "email" = "maxim.ziatdinov@ai4microcopy.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 license = {"file" = "LICENSE"}
-description='Gaussian processes in NumPyro and JAX'
+description='Gaussian processes in NumPyro and Jax'
 classifiers=[
     'Programming Language :: Python',
     'Development Status :: 3 - Alpha',
