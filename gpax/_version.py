@@ -7,4 +7,5 @@ try:
     __version__ = _dunamai.Version.from_any_vcs().serialize()
     del _dunamai
 except (ImportError, RuntimeError):
-    __version__ = "dev"
+    # Default to version 1.0.0 alpha
+    __version__ = "1.0.0a0"
