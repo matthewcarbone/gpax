@@ -75,6 +75,7 @@ class GaussianProcess(ABC, MSONable):
     )
     verbose = field(default=0, validator=instance_of(int))
     metadata = field(factory=dict)
+    use_cholesky = field(default=True, validator=instance_of(bool))
     _is_fit = field(default=False, validator=instance_of(bool))
 
     def _gp_prior(self, x, y=None):
@@ -187,6 +188,22 @@ class GaussianProcess(ABC, MSONable):
 
         return mean, cov
 
+    @staticmethod
+    def _standard_condition(k_XX, k_pX, k_pp, y):
+        k_XX_inv = jnp.linalg.inv(k_XX)
+        cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
+        mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
+        return mean, cov
+
+    @staticmethod
+    def _cholesky_condition(k_XX, k_pX, k_pp, y):
+        k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
+        A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
+        cov = k_pp - jnp.matmul(k_pX, A)
+        B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
+        mean = jnp.matmul(k_pX, B)
+        return mean, cov
+
     def _get_mean_and_covariance(self, x_new, kp):
         """A utility to get the multivariate normal posterior given the GP
         and the training set of data to condition on.
@@ -226,10 +243,10 @@ class GaussianProcess(ABC, MSONable):
             noise = k_noise
         k_XX = f(x, x, k_noise=noise, k_jitter=k_jitter, **kp)
 
-        y_residual = y.copy()
-        k_XX_inv = jnp.linalg.inv(k_XX)
-        cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
-        mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y_residual))
+        if self.use_cholesky:
+            mean, cov = self._cholesky_condition(k_XX, k_pX, k_pp, y)
+        else:
+            mean, cov = self._standard_condition(k_XX, k_pX, k_pp, y)
         return mean, cov
 
     def _sample(self, rng_key, x_new, kernel_params, n, condition_on_data=True):
