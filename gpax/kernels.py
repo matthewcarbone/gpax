@@ -4,6 +4,11 @@ kernels.py
 
 Kernel functions
 
+Note that the defined priors and parameters of the Kernel functions pertain
+to data _after_ transforms specified in the GP are applied. In other words,
+a k_length parameter of 1.0 would be the prior after the data is scaled or
+transformed by whatever transformation is specified in the GP.
+
 Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """

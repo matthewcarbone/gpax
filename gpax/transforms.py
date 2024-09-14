@@ -1,3 +1,12 @@
+"""
+transforms.py
+=======
+
+Module containing the transforms used in the GPax code.
+
+Created by Matthew R. Carbone (email: x94carbone@gmail.com)
+"""
+
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
@@ -83,6 +92,10 @@ class IdentityTransform(Transform):
         return x
 
 
+TMIN = -1.0
+TMAX = 1.0
+
+
 @define
 class ScaleTransform(Transform):
     """Simple transform class for scaling data, provided in the shape of
@@ -90,8 +103,6 @@ class ScaleTransform(Transform):
 
     minima = field(default=None, validator=instance_of(DATA_TYPES))
     maxima = field(default=None, validator=instance_of(DATA_TYPES))
-    tmin = field(default=-1.0, validator=instance_of(DATA_TYPES))
-    tmax = field(default=1.0, validator=instance_of(DATA_TYPES))
 
     def fit(self, x):
         assert not self._is_fit
@@ -104,23 +115,23 @@ class ScaleTransform(Transform):
     def _forward_mean(self, x):
         numerator = x - self.minima
         delta_r = self.maxima - self.minima + EPSILON
-        delta_t = self.tmax - self.tmin
-        return numerator / delta_r * delta_t + self.tmin
+        delta_t = TMAX - TMIN
+        return numerator / delta_r * delta_t + TMIN
 
     def _forward_std(self, x):
         delta_r = self.maxima - self.minima + EPSILON
-        delta_t = self.tmax - self.tmin
+        delta_t = TMAX - TMIN
         return x / delta_r * delta_t
 
     def _reverse_mean(self, x):
         delta_r = self.maxima - self.minima + EPSILON
-        delta_t = self.tmax - self.tmin + EPSILON
-        num = x * delta_r + self.minima * delta_t - self.tmin * delta_r
+        delta_t = TMAX - TMIN + EPSILON
+        num = x * delta_r + self.minima * delta_t - TMIN * delta_r
         return num / delta_t
 
     def _reverse_std(self, x):
         delta_r = self.maxima - self.minima + EPSILON
-        delta_t = self.tmax - self.tmin + EPSILON
+        delta_t = TMAX - TMIN + EPSILON
         return x * delta_r / delta_t
 
 

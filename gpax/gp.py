@@ -2,7 +2,8 @@
 gp.py
 =======
 
-Fully Bayesian implementation of Gaussian process regression
+- Fully Bayesian implementation of Gaussian process regression
+- Variationa inference implementation of Gaussian process regression
 
 Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
@@ -30,10 +31,12 @@ from numpyro.infer import (
     init_to_median,
 )
 from numpyro.infer.autoguide import AutoNormal
+from tqdm import tqdm
 
 from gpax import state
 from gpax.kernels import Kernel
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
+from gpax.utils import split_array
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -290,28 +293,11 @@ class GaussianProcess(ABC, MSONable):
 
         return self._sample_prior(rng_key, x_new, False)
 
-        # gp_samples = self.gp_samples
-        # samples = Predictive(self._gp_prior, num_samples=gp_samples)(
-        #     rng_key, x_new
-        # )
-        # n = samples["y"].shape[-1]
-        # samples["y"] = samples["y"].reshape(-1, 1, n)
-        # return samples
-
     def _sample_conditioned_prior(self, rng_key, x_new):
         """As this is a "private" method, it is assumed x_new is already
         transformed."""
 
         return self._sample_prior(rng_key, x_new, True)
-
-        # f = self.kernel.sample_parameters
-        # hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
-        # predictive = jax.vmap(
-        #     lambda p: self._sample(p[0], x_new, p[1], self.gp_samples)
-        # )
-        # keys = jra.split(rng_key, self.hp_samples)
-        # sampled = jnp.array(predictive((keys, hp_samples)))
-        # return {**hp_samples, "y": sampled}
 
     @abstractmethod
     def _sample_posterior(self): ...
