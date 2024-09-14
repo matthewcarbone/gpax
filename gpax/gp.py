@@ -31,12 +31,10 @@ from numpyro.infer import (
     init_to_median,
 )
 from numpyro.infer.autoguide import AutoNormal
-from tqdm import tqdm
 
 from gpax import state
 from gpax.kernels import Kernel
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
-from gpax.utils import split_array
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -105,7 +103,7 @@ class GaussianProcess(ABC, MSONable):
     def sample(self): ...
 
     @abstractmethod
-    def fit(self, key): ...
+    def fit(self): ...
 
     def __attrs_pre_init__(self):
         clear_cache()
@@ -255,7 +253,11 @@ class GaussianProcess(ABC, MSONable):
     def _sample(self, rng_key, x_new, kernel_params, n, condition_on_data=True):
         """Execute random samples over the GP for an explicit set of kernel
         parameters. As this is a "private" method, it is assumed x_new is
-        already transformed."""
+        already transformed.
+
+        Note that the key here is explicitly provided as this is a private
+        method.
+        """
 
         # Revert to the prior distribution if no updated kernel parameters
         # are provided
@@ -302,7 +304,7 @@ class GaussianProcess(ABC, MSONable):
     @abstractmethod
     def _sample_posterior(self): ...
 
-    def sample(self, key, x_new):
+    def sample(self, x_new):
         """Runs samples over the GP. These samples are some combination of
         results from sampling over the prior (or posterior) distribution of
         hyperparameters, and sampling from a GP assuming fixed hyperparameters.
@@ -324,8 +326,6 @@ class GaussianProcess(ABC, MSONable):
 
         Parameters
         ----------
-        key : int
-            Key for seeding the random number generator.
         x_new : array_like
             The input grid to sample on. Note that this is a "public" method
             and as such it is assumed x_new is _not_ transformed.
@@ -341,10 +341,7 @@ class GaussianProcess(ABC, MSONable):
             kernel parameters will not be.
         """
 
-        if isinstance(key, int):
-            rng_key = jra.key(key)
-        else:
-            rng_key = key
+        _, rng_key = state.get_rng_key()
 
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
         x_new = jax.device_put(x_new, state.device)
@@ -365,13 +362,11 @@ class GaussianProcess(ABC, MSONable):
 
         return samples
 
-    def predict(self, key, x_new):
+    def predict(self, x_new):
         """Finds the mean and variance of the model via sampling.
 
         Parameters
         ----------
-        key : int
-            Key for seeding the random number generator.
         x_new : array_like
             The input grid to find the mean and variance predictions on. As
             this is a "public" method, x_new should _not_ be transformed.
@@ -382,11 +377,9 @@ class GaussianProcess(ABC, MSONable):
         predictions evaluated on the grid x_new.
         """
 
-        rng_key = jra.key(key)
-
         # Note that samples here takes care of the transformations
         # samples actualy returns transformed results already
-        samples = self.sample(rng_key, x_new)
+        samples = self.sample(x_new)
         y = samples["y"]
         return jnp.mean(y, axis=[0, 1]), jnp.std(y, axis=[0, 1])
 
@@ -399,16 +392,8 @@ class ExactGP(GaussianProcess):
     chain_method = field(default="sequential", validator=instance_of(str))
     mcmc_run_kwargs = field(factory=dict)
 
-    def fit(self, key):
-        """Runs Hamiltonian Monte Carlo to infer the GP parameters.
-
-        Parameters
-        ----------
-        key : int
-            Random number generator key.
-        """
-
-        rng_key = jra.key(key)
+    def fit(self):
+        """Runs Hamiltonian Monte Carlo to infer the GP parameters."""
 
         init_strategy = init_to_median(num_samples=10)
         kernel = NUTS(self._gp_prior, init_strategy=init_strategy)
@@ -424,10 +409,11 @@ class ExactGP(GaussianProcess):
         x, y = self.x_transformed, self.y_transformed
         x = jax.device_put(x, state.device)
         y = jax.device_put(y, state.device)
+        key, rng_key = state.get_rng_key()
         self.mcmc.run(rng_key, x, y, **self.mcmc_run_kwargs)
         if self.verbose > 0:
             self.mcmc.print_summary()
-        self.metadata["fit_key"] = np.array(rng_key)
+        self.metadata["fit_key"] = np.array(key)
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new):
@@ -472,8 +458,8 @@ class VariationalInferenceGP(GaussianProcess):
             )
             self.hp_samples = 1
 
-    def fit(self, key):
-        rng_key = jra.key(key)
+    def fit(self):
+        _, rng_key = state.get_rng_key()
         optim = self.optimizer_factory(**self.optimizer_kwargs)
         guide = self.guide_factory(self._gp_prior)
         loss = self.loss_factory()
@@ -494,7 +480,7 @@ class VariationalInferenceGP(GaussianProcess):
         kernel_params["y"] = samples
         return kernel_params
 
-    def predict(self, key, x_new):
+    def predict(self, x_new):
         # Override the default sampling behavior if the model is fit and
         # the data is provided. SVI is special in that there is only the
         # median kernel parameters to consider
@@ -502,17 +488,9 @@ class VariationalInferenceGP(GaussianProcess):
         if not self._is_fit:
             # sample will transform x_new for us as well as the samples
             # themselves
-            sampled = super().sample(key, x_new)
+            sampled = super().sample(x_new)
             y = sampled["y"]
             return y.mean(axis=[0, 1]), y.std(axis=[0, 1])
-
-        if key is not None:
-            warn(
-                "Unless the model is not fit, a random number is not "
-                "used during predict for VariationalInferenceGP, as only "
-                "the median value of the kernels are used for prediction. "
-                "Provided key will be ignored."
-            )
 
         # here the transforms need to be applied
         x_new = self.input_transform.forward(x_new, transforms_as="mean")

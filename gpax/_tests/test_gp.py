@@ -1,6 +1,6 @@
-import jax.random as jrand
 import pytest
 
+from gpax import state
 from gpax.gp import ExactGP, VariationalInferenceGP
 from gpax.kernels import RBFKernel
 
@@ -27,7 +27,7 @@ def test_ExactGP_sample_shapes(
         HP_SAMPLES = 1
         KWARGS["hp_samples"] = HP_SAMPLES
     x, y, x_grid = dummy_sinusoidal_data
-    key = 4
+    state.set_rng_key(0)
     kernel = kernel_factory()
     if model_state == "unconditioned_prior":
         if y_std is not None:
@@ -39,9 +39,9 @@ def test_ExactGP_sample_shapes(
         gp = gp_factory(kernel=kernel, x=x, y=y, y_std=y_std, **KWARGS)
     else:
         gp = gp_factory(kernel=kernel, x=x, y=y, y_std=y_std, **KWARGS)
-        gp.fit(key)
+        gp.fit()
 
-    samples = gp.sample(key, x_grid)
+    samples = gp.sample(x_grid)
     y = samples["y"]
     assert y.ndim == 3
     assert y.shape[0] == HP_SAMPLES

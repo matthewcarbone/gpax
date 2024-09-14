@@ -22,6 +22,7 @@ from monty.json import MSONable
 from scipy.stats import qmc
 from tqdm import tqdm
 
+from gpax import state
 from gpax.utils import split_array
 
 DATA_TYPES = [jnp.ndarray, np.ndarray]
@@ -59,7 +60,7 @@ class AcquisitionFunction(ABC, MSONable):
         assert self.bounds.ndim == 2
         assert self.bounds.shape[0] == 2
 
-    def _get_integrand_samples(self, key, model, x):
+    def _get_integrand_samples(self, model, x):
         """Gets samples from the integrand given an array of shape (N, q, d)
         and returns only the observation values in the shape
         (hp_samples x gp_samples, N, q)."""
@@ -68,12 +69,12 @@ class AcquisitionFunction(ABC, MSONable):
         d = x.shape[2]
 
         # samples is always of shape (hp_samples, gp_samples, N x q)
-        samples = model.sample(key, x.reshape(-1, d))
+        samples = model.sample(x.reshape(-1, d))
         samples = samples["y"].reshape(-1, N, self.q)
         return samples
 
     @abstractmethod
-    def integrand(self, key, model, x):
+    def _integrand(self, model, x):
         """The integrand of the acquisition function in integral form. See
         Wilson et al. (https://arxiv.org/abs/1712.00424). Specifically, this
         is the vale for h in Eq. (1). Note that this is only used and required
@@ -82,7 +83,7 @@ class AcquisitionFunction(ABC, MSONable):
 
         raise NotImplementedError
 
-    def analytic(self, key, model, x):
+    def _analytic(self, model, x):
         """Returns the analytic form of the acquisition function evaluated at
         point x. Note that by default, this will raise a NotImplementedError,
         and the analytic form of the acquisition function, for q=1 only, must
@@ -95,7 +96,7 @@ class AcquisitionFunction(ABC, MSONable):
             "analytic acquisition function defined"
         )
 
-    def _monte_carlo_evaluation(self, key, model, x):
+    def _monte_carlo_evaluation(self, model, x):
         """Executes the evaluation of the monte carlo sampling procedure given
         design point x."""
 
@@ -107,12 +108,12 @@ class AcquisitionFunction(ABC, MSONable):
 
         # Get the value of the integrand, h, evaluated for many samples of
         # the GP
-        h = self.integrand(key, model, x)
+        h = self._integrand(model, x)
 
         # Return the average over samples of the GP
         return h.mean(axis=0)
 
-    def _analytic_evaluation(self, key, model, x):
+    def _analytic_evaluation(self, model, x):
         if self.q > 1:
             raise ValueError("Cannot evaluate analytic expression for q!=1")
 
@@ -122,16 +123,14 @@ class AcquisitionFunction(ABC, MSONable):
         if x.ndim != 2:
             raise ValueError(x_shape_err_msg(x, ("N", "d")))
 
-        return self.analytic(key, model, x)
+        return self._analytic(model, x)
 
-    def __call__(self, key, model, x):
+    def __call__(self, model, x):
         """Produces the value of the acquisition function evaluated at point
         x.
 
         Parameters
         ----------
-        key : int
-            The random state for the optimization.
         model : gpax.gp.GaussianProcess
             A GaussianProcess instance.
         x : array_like
@@ -155,18 +154,16 @@ class AcquisitionFunction(ABC, MSONable):
         x = jnp.array(x)
 
         if self.force_monte_carlo or self.q > 1:
-            return self._monte_carlo_evaluation(key, model, x)
+            return self._monte_carlo_evaluation(model, x)
 
-        return self._analytic_evaluation(key, model, x)
+        return self._analytic_evaluation(model, x)
 
-    def _optimize_halton(self, key, model, n_samples):
+    def _optimize_halton(self, model, n_samples):
         """Optimizes the acquisition function using Halton random
         sampling/Monte Carlo.
 
         Parameters
         ----------
-        key : int
-            The random state for the optimization.
         model : gpax.gp.GaussianProcess
             A GaussianProcess instance.
         n_samples : int
@@ -178,6 +175,8 @@ class AcquisitionFunction(ABC, MSONable):
         The q x d array containing the optimal sampled points, as well as the
         value of the acquisition function at the sampled point.
         """
+
+        key, _ = state.get_rng_key()
 
         halton = qmc.Halton(d=self.bounds.shape[1] * self.q, seed=key)
         samples = halton.random(n=n_samples)
@@ -195,16 +194,16 @@ class AcquisitionFunction(ABC, MSONable):
         for xx in tqdm(samples_split, disable=not verbose):
             # Note that self.__call__ calls sample, and sample executes all
             # necessary transforms on the data
-            vals.append(self.__call__(key, model, xx))
+            vals.append(self.__call__(model, xx))
         vals = jnp.array(vals).flatten()
         argmax = vals.argmax()
 
         return samples[argmax, ...], vals[argmax].item()
 
-    def optimize(self, key, model, n, method="halton"):
+    def optimize(self, model, n, method="halton"):
         method = method.lower()
         if method == "halton":
-            return self._optimize_halton(key, model, n)
+            return self._optimize_halton(model, n)
         else:
             raise ValueError(f"Unknown optimizer {method}")
 
@@ -238,14 +237,14 @@ class UpperConfidenceBound(AcquisitionFunction):
 
     beta = field(default=10.0, validator=[instance_of((int, float)), ge(0.0)])
 
-    def analytic(self, key, model, x):
-        mean, std = model.predict(key, x)
+    def _analytic(self, model, x):
+        mean, std = model.predict(x)
         if bool(jnp.isinf(self.beta)):
             return std
         return mean + jnp.sqrt(self.beta) * std
 
-    def integrand(self, key, model, x):
-        samples = self._get_integrand_samples(key, model, x)
+    def _integrand(self, model, x):
+        samples = self._get_integrand_samples(model, x)
         mean = samples.mean(axis=0, keepdims=True)
         if bool(jnp.isinf(self.beta)):
             return jnp.abs(samples - mean).max(axis=-1)
@@ -255,8 +254,8 @@ class UpperConfidenceBound(AcquisitionFunction):
 
 @define
 class ExpectedImprovement(AcquisitionFunction):
-    def analytic(self, key, model, x):
-        mean, std = model.predict(key, x)
+    def _analytic(self, model, x):
+        mean, std = model.predict(x)
         y_max = model.y.max()
         u = (mean - y_max) / std
         normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
@@ -265,8 +264,8 @@ class ExpectedImprovement(AcquisitionFunction):
         acq = std * (updf + u * ucdf)
         return acq
 
-    def integrand(self, key, model, x):
-        samples = self._get_integrand_samples(key, model, x)
+    def _integrand(self, model, x):
+        samples = self._get_integrand_samples(model, x)
         y_max = model.y.max()
         f_max_over_q = samples.max(axis=-1)
         where_gt_0 = f_max_over_q > 0
