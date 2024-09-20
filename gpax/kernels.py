@@ -13,12 +13,11 @@ Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
-import jax.numpy as jnp
+import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from attrs import define, field
 from attrs.validators import gt, instance_of
-from jax import jit
 from monty.json import MSONable
 
 
@@ -44,7 +43,7 @@ def _squared_distance(X, Z, lengthscale):
     scaled_Z = Z / lengthscale
     X2 = (scaled_X**2).sum(1, keepdims=True)
     Z2 = (scaled_Z**2).sum(1, keepdims=True)
-    XZ = jnp.matmul(scaled_X, scaled_Z.T)
+    XZ = scaled_X @ scaled_Z.T
     r2 = X2 - 2 * XZ + Z2.T
     return r2.clip(0)
 
@@ -71,7 +70,7 @@ def get_parameter_prior(name, distribution, plate_dims=1):
     """
 
     if isinstance(distribution, (float, int)):
-        return numpyro.deterministic(name, jnp.array(distribution))
+        return numpyro.deterministic(name, np.array(distribution))
 
     if not isinstance(distribution, numpyro.distributions.Distribution):
         raise ValueError(
@@ -131,14 +130,17 @@ class RBFKernel(Kernel):
         }
 
     @staticmethod
-    @jit
+    def noiseless_kernel(X1, X2, k_scale, k_length):
+        r2 = _squared_distance(X1, X2, k_length)
+        return k_scale * np.exp(-0.5 * r2)
+
+    @staticmethod
     def kernel(
         X1, X2, k_scale, k_length, k_noise=0.0, k_jitter=1e-6, apply_noise=True
     ):
-        r2 = _squared_distance(X1, X2, k_length)
-        k = k_scale * jnp.exp(-0.5 * r2)
+        k = RBFKernel.noiseless_kernel(X1, X2, k_scale, k_length)
         if X1.shape == X2.shape and apply_noise:
-            k += _add_jitter(k_noise, k_jitter) * jnp.eye(X1.shape[0])
+            k += _add_jitter(k_noise, k_jitter) * np.eye(X1.shape[0])
         return k
 
     def sample_parameters(self):
