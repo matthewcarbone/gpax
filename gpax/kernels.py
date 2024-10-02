@@ -13,11 +13,16 @@ Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
+from abc import ABC, abstractmethod
+from contextlib import contextmanager
+
+import jax.numpy as jnp
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
 from attrs import define, field
 from attrs.validators import gt, instance_of
+from jax import jit
 from monty.json import MSONable
 
 
@@ -70,7 +75,7 @@ def get_parameter_prior(name, distribution, plate_dims=1):
     """
 
     if isinstance(distribution, (float, int)):
-        return numpyro.deterministic(name, np.array(distribution))
+        return numpyro.deterministic(name, jnp.array(distribution))
 
     if not isinstance(distribution, numpyro.distributions.Distribution):
         raise ValueError(
@@ -99,12 +104,34 @@ def get_parameter_as_float(parameter):
 
 
 @define
-class Kernel(MSONable):
+class Kernel(MSONable, ABC):
     k_noise = field(
         default=dist.LogNormal(0.0, 1.0),
         validator=instance_of((dist.Distribution, int, float)),
     )
     k_jitter = field(default=1e-6, validator=[instance_of(float), gt(0.0)])
+    jit = field(default=True)
+
+    @contextmanager
+    def no_jit(self):
+        self.jit = False
+        try:
+            yield
+        finally:
+            self.jit = True
+
+    @abstractmethod
+    def _kernel(self): ...
+
+    @property
+    def kernel(self):
+        def _f(*args, **kwargs):
+            return self._kernel(*args, **kwargs, jit=self.jit)
+
+        if self.jit:
+            return jit(_f)
+        else:
+            return _f
 
 
 @define
@@ -130,17 +157,26 @@ class RBFKernel(Kernel):
         }
 
     @staticmethod
-    def noiseless_kernel(X1, X2, k_scale, k_length):
-        r2 = _squared_distance(X1, X2, k_length)
-        return k_scale * np.exp(-0.5 * r2)
-
-    @staticmethod
-    def kernel(
-        X1, X2, k_scale, k_length, k_noise=0.0, k_jitter=1e-6, apply_noise=True
+    def _kernel(
+        X1,
+        X2,
+        k_scale,
+        k_length,
+        k_noise=0.0,
+        k_jitter=1e-6,
+        apply_noise=True,
+        jit=True,
     ):
-        k = RBFKernel.noiseless_kernel(X1, X2, k_scale, k_length)
+        if jit:
+            _exp = jnp.exp
+            _eye = jnp.eye
+        else:
+            _exp = np.exp
+            _eye = np.eye
+        r2 = _squared_distance(X1, X2, k_length)
+        k = k_scale * _exp(-0.5 * r2)
         if X1.shape == X2.shape and apply_noise:
-            k += _add_jitter(k_noise, k_jitter) * np.eye(X1.shape[0])
+            k += _add_jitter(k_noise, k_jitter) * _eye(X1.shape[0])
         return k
 
     def sample_parameters(self):
@@ -167,7 +203,7 @@ class RBFKernel(Kernel):
         """Radial basis function kernel prior. The parameters of this function
         are assumed to be distributions."""
 
-        return RBFKernel.kernel(X1, X2, **self.sample_parameters())
+        return self.kernel(X1, X2, **self.sample_parameters())
 
 
 # @jit

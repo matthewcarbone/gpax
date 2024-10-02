@@ -29,6 +29,7 @@ dependencies = [
     "jaxopt",
     "monty",
     "attrs",
+    "loguru",
 ]
 
 dynamic = ["version"]
