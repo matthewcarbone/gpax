@@ -11,7 +11,6 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from functools import wraps
 from warnings import warn
 
 import jax
@@ -34,11 +33,10 @@ from numpyro.infer import (
 from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
-from gpax.kernels import Kernel, _add_jitter
+from gpax.kernels import Kernel
 from gpax.logger import logger
-from gpax.ski import compute_cubic_interpolation_sparse_weights, lanczos
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
-from gpax.utils import Timer, dict_of_list_to_list_of_dict, get_coordinates
+from gpax.utils import Timer, get_coordinates
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -47,24 +45,6 @@ DATA_TYPES = [jnp.ndarray, np.ndarray, type(None)]
 Y_STD_DATA_TYPES = DATA_TYPES + [float] + [int]
 DATA_TYPES = tuple(DATA_TYPES)
 Y_STD_DATA_TYPES = tuple(Y_STD_DATA_TYPES)
-
-
-def cache(name):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(self, *args, **kwargs):
-            _cache = getattr(self, "LOVE_cache", None)
-            if _cache is None:
-                raise AttributeError
-            if name in _cache:
-                return _cache["name"]
-            result = func(self, *args, **kwargs)
-            _cache["name"] = result
-            return result
-
-        return wrapper
-
-    return decorator
 
 
 @define
@@ -99,6 +79,7 @@ class GaussianProcess(ABC, MSONable):
     verbose = field(default=0, validator=instance_of(int))
     metadata = field(factory=dict)
     use_cholesky = field(default=True, validator=instance_of(bool))
+    fast_prediction = field(default=False, validator=instance_of(bool))
     _is_fit = field(default=False, validator=instance_of(bool))
 
     def _gp_prior(self, x, y=None):
@@ -323,18 +304,19 @@ class GaussianProcess(ABC, MSONable):
             mean, cov = self._get_mean_and_covariance_unconditioned(
                 x_new, kp=kernel_params
             )
-        print(mean, "\n", "-" * 8, cov)
-        print("-" * 10)
         sampled = dist.MultivariateNormal(mean, cov).sample(
             rng_key, sample_shape=(n,)
         )
-        print(sampled)
-        print("-" * 8)
         return sampled
 
-    def _sample_prior(self, rng_key, x_new, condition_on_data):
+    def _sample_prior(self, rng_key, x_new, condition_on_data, fast):
         f = self.kernel.sample_parameters
         hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
+        if fast:
+            hp_samples = {
+                key: jnp.median(value, keepdims=True)
+                for key, value in hp_samples.items()
+            }
         predictive = jax.vmap(
             lambda p: self._sample_single_kernel_hp(
                 p[0],
@@ -348,17 +330,17 @@ class GaussianProcess(ABC, MSONable):
         sampled = jnp.array(predictive((keys, hp_samples)))
         return {**hp_samples, "y": sampled}
 
-    def _sample_unconditioned_prior(self, rng_key, x_new):
+    def _sample_unconditioned_prior(self, rng_key, x_new, fast):
         """As this is a "private" method, it is assumed x_new is already
         transformed."""
 
-        return self._sample_prior(rng_key, x_new, False)
+        return self._sample_prior(rng_key, x_new, False, fast)
 
-    def _sample_conditioned_prior(self, rng_key, x_new):
+    def _sample_conditioned_prior(self, rng_key, x_new, fast):
         """As this is a "private" method, it is assumed x_new is already
         transformed."""
 
-        return self._sample_prior(rng_key, x_new, True)
+        return self._sample_prior(rng_key, x_new, True, fast)
 
     @abstractmethod
     def _sample_posterior(self): ...
@@ -374,7 +356,7 @@ class GaussianProcess(ABC, MSONable):
         y = np.array(y)
         return y
 
-    def sample(self, x_new):
+    def sample(self, x_new, fast=None):
         """Runs samples over the GP. These samples are some combination of
         results from sampling over the prior (or posterior) distribution of
         hyperparameters, and sampling from a GP assuming fixed hyperparameters.
@@ -399,6 +381,12 @@ class GaussianProcess(ABC, MSONable):
         x_new : array_like
             The input grid to sample on. Note that this is a "public" method
             and as such it is assumed x_new is _not_ transformed.
+        fast : bool
+            If True, will take the median of the sampled hyperparameters only
+            instead of running predictions over every sample. This is
+            particularly helpful for situations where each prediction is slow
+            and we can tolerate a coarser approximation. Default is None
+            (defaults to the value set at instantiation).
 
         Returns
         -------
@@ -411,22 +399,25 @@ class GaussianProcess(ABC, MSONable):
             kernel parameters will not be.
         """
 
+        if fast is None:
+            fast = self.fast_prediction
+
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
         rng_key, x_new = self._pre_sample(x_new)
         if self.x is None and self.y is None:
-            samples = self._sample_unconditioned_prior(rng_key, x_new)
+            samples = self._sample_unconditioned_prior(rng_key, x_new, fast)
         elif not self._is_fit:
-            samples = self._sample_conditioned_prior(rng_key, x_new)
+            samples = self._sample_conditioned_prior(rng_key, x_new, fast)
         else:
-            samples = self._sample_posterior(rng_key, x_new)
+            samples = self._sample_posterior(rng_key, x_new, fast)
         y = self._post_sample(samples["y"])
 
         samples["y"] = self.output_transform.reverse(y, transforms_as="mean")
 
         return samples
 
-    def predict(self, x_new):
+    def predict(self, x_new, fast=False):
         """Finds the mean and variance of the model via sampling.
 
         Parameters
@@ -434,20 +425,29 @@ class GaussianProcess(ABC, MSONable):
         x_new : array_like
             The input grid to find the mean and variance predictions on. As
             this is a "public" method, x_new should _not_ be transformed.
+        fast : bool
+            If True, will take the median of the sampled hyperparameters only
+            instead of running predictions over every sample. This is
+            particularly helpful for situations where each prediction is slow
+            and we can tolerate a coarser approximation. Default is None
+            (defaults to the value set at instantiation).
 
         Returns
         -------
         Two arrays, one for the mean, and the other for the variance of the
-        predictions evaluated on the grid x_new.
+        predictions evaluated on the grid x_new. Also returns the samples
+        themselves, which is a dictionary containing not only sampled
+        hyperparmeters, but also the observations "y".
         """
 
         # Note that samples here takes care of the transformations
         # samples actualy returns transformed results already
-        samples = self.sample(x_new)
-        y = samples["y"]
-        mean = y.mean(axis=(0, 1))
-        std = y.std(axis=(0, 1))
-        return mean, std
+        if fast is None:
+            fast = self.fast_prediction
+        samples = self.sample(x_new, fast=fast)
+        mean = samples["y"].mean(axis=(0, 1))
+        std = samples["y"].std(axis=(0, 1))
+        return mean, std, samples
 
 
 @define
@@ -482,8 +482,13 @@ class ExactGP(GaussianProcess):
         self.metadata["fit_key"] = np.array(key)
         self._is_fit = True
 
-    def _sample_posterior(self, rng_key, x_new):
+    def _sample_posterior(self, rng_key, x_new, fast=True):
         samples = self.mcmc.get_samples(group_by_chain=False)
+        if fast:
+            samples = {
+                key: jnp.median(value, keepdims=True)
+                for key, value in samples.items()
+            }
         chain_length = len(next(iter(samples.values())))
         predictive = jax.vmap(
             lambda p: self._sample_single_kernel_hp(
@@ -493,172 +498,6 @@ class ExactGP(GaussianProcess):
         keys = jra.split(rng_key, chain_length)
         sampled = predictive((keys, samples))
         return {**samples, "y": sampled}
-
-
-@define
-class LOVEExactGP(ExactGP):
-    lanczos_iterations = field(default=50)
-    inducing_points_per_dimension = field(default=50)
-    _LOVE_cache = field(factory=dict)
-
-    def _get_mean_and_covariance(self, x_new, kp, lanczos_iterations=None):
-        # n_train total training points
-        # m number of inducing points
-        # n_test total number of testing points
-        k_noise = kp.pop("k_noise")
-        k_jitter = kp.pop("k_jitter")
-
-        # NOTE: This part here cannot be pre-computed and must be done
-        # every time we use a new x_new vector
-        # However, it can be pre-computed if this function is called more than
-        # once for the same x_new but different kp!
-        # Might want to figure out a way to do that.
-        # ------------------------------
-        with self.kernel.no_jit():
-            f = self.kernel.kernel  # this is a function
-        # TODO: test hte cubic interpolation sparse weights next!!!
-        W_x_new = compute_cubic_interpolation_sparse_weights(
-            x_new,
-            self.inducing_points_transformed,
-            lambda x1, x2: f(x1, x2, apply_noise=False, **kp),
-        )
-        W_x_new = W_x_new.T  # W_x_new shape should be (m, n_test)
-        logger.debug(f"W_x_new shape is {W_x_new.shape}")
-
-        if not self.observation_noise:
-            noise = self.observation_noise
-        else:
-            noise = k_noise
-        K_pp = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
-        logger.debug(f"K_pp shape is {K_pp.shape}")
-
-        K_UU = f(
-            self.inducing_points_transformed,
-            self.inducing_points_transformed,
-            apply_noise=False,
-            **kp,
-        )
-        logger.debug(f"K_UU shape is {K_UU.shape}")
-
-        W_X = compute_cubic_interpolation_sparse_weights(
-            self.x_transformed,
-            self.inducing_points_transformed,
-            lambda x1, x2: f(x1, x2, apply_noise=False, **kp),
-        )
-        W_X = W_X.T  # W_X should be (m, n_train)
-        logger.debug(f"W_X shape is {W_X.shape}")
-
-        # TODO: pre-compute this!
-        y_std = self.y_std_transformed
-        if y_std is not None:
-            noise = y_std**2
-        else:
-            noise = k_noise
-        sigma = np.eye(W_X.shape[1]) * _add_jitter(k_noise, k_jitter)
-        K_xx_tilde = W_X.T @ K_UU @ W_X + sigma  # (n_train, n_train)
-        # gotta add the noise as well!
-        logger.debug(f"K_xx_tilde shape is {K_xx_tilde.shape}")
-
-        # TODO: pre-compute this!
-        # TODO: use correct b value!
-        dimension = self.x_transformed.shape[1]
-        m = self.inducing_points_per_dimension * dimension
-        v0 = W_X.T @ K_UU @ np.ones(shape=(K_UU.shape[1], 1)) / m
-        Q, T, r = lanczos(
-            K_xx_tilde,
-            lanczos_iterations
-            if lanczos_iterations is not None
-            else self.lanczos_iterations,
-            v0=v0.squeeze(),
-        )  # v0=v0.squeeze())
-        logger.debug(f"lanczos residual is {r:.03e}")
-        # k is the number of lanczos iterations
-        # Q should be n x k
-        # T should be k x k
-        logger.debug(f"Q shape is {Q.shape} \n T shape is {T.shape}")
-
-        # TODO: pre-compute R!
-        R = Q.T @ W_X.T @ K_UU
-        logger.debug(f"R shape is {R.shape}")
-
-        # TODO: pre-compute R'!
-        # L = scipy.linalg.cholesky(T)
-        # R_prime = scipy.linalg.cho_solve((L, lower), R)
-        R_prime = np.linalg.solve(T, R)
-        logger.debug(f"R_prime shape is {R_prime.shape}")
-
-        u = R @ W_x_new
-        v = R_prime @ W_x_new
-        logger.debug(f"v shape is {v.shape}, u shape is {u.shape}")
-
-        cov = K_pp - u.T @ v
-        print(K_pp)
-        logger.debug(f"cov shape is {cov.shape}")
-
-        mean = (
-            W_x_new.T
-            @ K_UU
-            @ W_X
-            @ Q
-            @ np.linalg.inv(T)
-            @ Q.T
-            @ self.y_transformed
-        )
-
-        logger.debug(f"mean shape is {mean.shape}")
-
-        return mean, cov
-
-    def _sample_posterior(self, rng_key, x_new):
-        samples = self.mcmc.get_samples(group_by_chain=False)
-        samples = {key: np.array(value) for key, value in samples.items()}
-        hp_samples_as_list = dict_of_list_to_list_of_dict(samples)
-        chain_length = len(next(iter(samples.values())))
-        keys = jra.split(rng_key, chain_length)
-
-        # sampled is lazy
-        sampled = map(
-            lambda p: self._sample_single_kernel_hp(
-                p[0], x_new, p[1], self.gp_samples
-            ),
-            zip(keys, hp_samples_as_list),
-        )
-        # now sampled is explicitly initialized
-        sampled = np.array(list(sampled))
-
-        keys = jra.split(rng_key, chain_length)
-        return {**samples, "y": sampled}
-
-    def _pre_sample(self, x_new):
-        _, rng_key = state.get_rng_key()
-        return rng_key, x_new
-
-    def _post_sample(self, y):
-        return y
-
-    # def _get_mean_and_covariance(self, x_new, kp): ...
-    # def _sample_prior(self, rng_key, x_new, condition_on_data):
-    #     f = self.kernel.sample_parameters
-    #     hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
-    #     keys = jra.split(rng_key, self.hp_samples)
-    #
-    #     # Instead of vmap, we use zip to avoid the jax backend causing all
-    #     # sorts of problems when operations are not purely written in terms
-    #     # of jax. This is necessary since LOVE requires sparse linear algebra
-    #     # which is not supported in jax.
-    #     hp_samples_as_list = dict_of_list_to_list_of_dict(hp_samples)
-    #     sampled = map(
-    #         lambda p: self._sample_single_kernel_hp(
-    #             p[0],
-    #             x_new,
-    #             p[1],
-    #             self.gp_samples,
-    #             condition_on_data=condition_on_data,
-    #         ),
-    #         zip(keys, hp_samples_as_list),
-    #     )
-    #     return {**hp_samples, "y": np.array(list(sampled))}
-    #
 
 
 @define
@@ -707,7 +546,13 @@ class VariationalInferenceGP(GaussianProcess):
         self.metadata["fit_key"] = np.array(rng_key)
         self._is_fit = True
 
-    def _sample_posterior(self, rng_key, x_new):
+    def _sample_posterior(self, rng_key, x_new, fast):
+        if fast:
+            logger.warning(
+                "Note setting fast = True for VIGP will do nothing."
+                "VIGP only uses the median value of the hyperparameters by "
+                "default."
+            )
         kernel_params = self.svi.guide.median(self.kernel_params.params)
         samples = self._sample_single_kernel_hp(
             rng_key, x_new, kernel_params, self.gp_samples
@@ -716,7 +561,7 @@ class VariationalInferenceGP(GaussianProcess):
         kernel_params["y"] = samples
         return kernel_params
 
-    def predict(self, x_new):
+    def predict(self, x_new, fast=False):
         # Override the default sampling behavior if the model is fit and
         # the data is provided. SVI is special in that there is only the
         # median kernel parameters to consider
@@ -724,7 +569,7 @@ class VariationalInferenceGP(GaussianProcess):
         if not self._is_fit:
             # sample will transform x_new for us as well as the samples
             # themselves
-            sampled = super().sample(x_new)
+            sampled = super().sample(x_new, fast=fast)
             y = sampled["y"]
             return y.mean(axis=[0, 1]), y.std(axis=[0, 1])
 

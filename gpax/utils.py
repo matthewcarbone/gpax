@@ -14,7 +14,6 @@ from time import perf_counter
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 
 def enable_x64():
