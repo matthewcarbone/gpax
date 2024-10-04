@@ -11,6 +11,7 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from functools import cached_property
 from warnings import warn
 
 import jax
@@ -19,7 +20,7 @@ import jax.random as jra
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from attrs import define, field
+from attrs import define, field, frozen
 from attrs.validators import gt, instance_of
 from monty.json import MSONable
 from numpyro.infer import (
@@ -45,6 +46,53 @@ DATA_TYPES = [jnp.ndarray, np.ndarray, type(None)]
 Y_STD_DATA_TYPES = DATA_TYPES + [float] + [int]
 DATA_TYPES = tuple(DATA_TYPES)
 Y_STD_DATA_TYPES = tuple(Y_STD_DATA_TYPES)
+
+
+@frozen
+class GPResult(MSONable):
+    """Container for accessing GP results."""
+
+    _hp = field(default=None)
+    _y = field(default=None)
+    _mu = field(default=None)
+    _sd = field(default=None)
+
+    @property
+    def y(self):
+        """Samples over the GP. The shape of the returned array is
+        (hp, gp, L), where n_hp indexes the kernel hyperparameter, gp indexes
+        the sample from the GP, and L indexes the spatial component of the
+        stochastic process."""
+
+        return self._y
+
+    @property
+    def hp(self):
+        """Samples of the hyperparameters."""
+
+        return self._hp
+
+    @cached_property
+    def mu(self):
+        """The mean of the GP."""
+
+        if self._y.shape[0] == 1:
+            return self._mu.squeeze()
+        return np.mean(self._y, axis=(0, 1)).squeeze()
+
+    @cached_property
+    def sd(self):
+        """The standard deviation of the GP."""
+
+        if self._y.shape[0] == 1:
+            return self._sd.squeeze()
+        return np.std(self._y, axis=(0, 1)).squeeze()
+
+    @cached_property
+    def ci(self):
+        """Confidence interval of mu +/- sd."""
+
+        return self.mu - self.sd, self.mu + self.sd
 
 
 @define
@@ -97,7 +145,7 @@ class GaussianProcess(ABC, MSONable):
         m = jnp.zeros(x.shape[0])
         k = self.kernel.sample_prior(x, x)
         return numpyro.sample(
-            "y",
+            "y_sampled",
             dist.MultivariateNormal(loc=m, covariance_matrix=k),
             obs=y,
         )
@@ -284,7 +332,7 @@ class GaussianProcess(ABC, MSONable):
             mean, cov = self._standard_condition(k_XX, k_pX, k_pp, y)
         return mean, cov
 
-    def _sample_single_kernel_hp(
+    def _sample_gp_given_single_hp(
         self, rng_key, x_new, kernel_params, n, condition_on_data=True
     ):
         """Execute random samples over the GP for an explicit set of kernel
@@ -307,7 +355,7 @@ class GaussianProcess(ABC, MSONable):
         sampled = dist.MultivariateNormal(mean, cov).sample(
             rng_key, sample_shape=(n,)
         )
-        return sampled
+        return mean, jnp.sqrt(cov.diagonal()), sampled
 
     def _sample_prior(self, rng_key, x_new, condition_on_data, fast):
         f = self.kernel.sample_parameters
@@ -318,7 +366,7 @@ class GaussianProcess(ABC, MSONable):
                 for key, value in hp_samples.items()
             }
         predictive = jax.vmap(
-            lambda p: self._sample_single_kernel_hp(
+            lambda p: self._sample_gp_given_single_hp(
                 p[0],
                 x_new,
                 p[1],
@@ -327,8 +375,8 @@ class GaussianProcess(ABC, MSONable):
             )
         )
         keys = jra.split(rng_key, self.hp_samples)
-        sampled = jnp.array(predictive((keys, hp_samples)))
-        return {**hp_samples, "y": sampled}
+        mu, sd, sampled = predictive((keys, hp_samples))
+        return hp_samples, mu, sd, sampled
 
     def _sample_unconditioned_prior(self, rng_key, x_new, fast):
         """As this is a "private" method, it is assumed x_new is already
@@ -350,11 +398,6 @@ class GaussianProcess(ABC, MSONable):
         _, rng_key = state.get_rng_key()
         x_new = jax.device_put(x_new, state.device)
         return rng_key, x_new
-
-    def _post_sample(self, y):
-        y = jax.device_put(y, jax.devices("cpu")[0])
-        y = np.array(y)
-        return y
 
     def sample(self, x_new, fast=None):
         """Runs samples over the GP. These samples are some combination of
@@ -390,13 +433,9 @@ class GaussianProcess(ABC, MSONable):
 
         Returns
         -------
-        dict
-            A dictionary containing all of the samples over the hyperparameters
-            and observations. The observations in particular are of the shape
-            (hp_samples, gp_samples, X_new.shape[0]) array corresponding to the
-            sampled results. The resulting values for "y" will be reverse
-            transformed back to the original space, but the values for the
-            kernel parameters will not be.
+        GPResults
+            A class containing all of the samples over the hyperparameters
+            and observations.
         """
 
         if fast is None:
@@ -405,49 +444,28 @@ class GaussianProcess(ABC, MSONable):
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
         rng_key, x_new = self._pre_sample(x_new)
+
+        a = (rng_key, x_new, fast)
         if self.x is None and self.y is None:
-            samples = self._sample_unconditioned_prior(rng_key, x_new, fast)
+            hp, mu, sd, y = self._sample_unconditioned_prior(*a)
         elif not self._is_fit:
-            samples = self._sample_conditioned_prior(rng_key, x_new, fast)
+            hp, mu, sd, y = self._sample_conditioned_prior(*a)
         else:
-            samples = self._sample_posterior(rng_key, x_new, fast)
-        y = self._post_sample(samples["y"])
+            hp, mu, sd, y = self._sample_posterior(*a)
 
-        samples["y"] = self.output_transform.reverse(y, transforms_as="mean")
+        # Postprocess, send to cpu and convert to numpy arrays
+        cpu = jax.devices("cpu")[0]
+        y = np.array(jax.device_put(y, cpu))
+        mu = np.array(jax.device_put(mu, cpu))
+        sd = np.array(jax.device_put(sd, cpu))
+        hp = {k: np.atleast_1d(jax.device_put(v, cpu)) for k, v in hp.items()}
 
-        return samples
+        # Transform back
+        y = self.output_transform.reverse(y, transforms_as="mean")
+        mu = self.output_transform.reverse(mu, transforms_as="mean")
+        sd = self.output_transform.reverse(sd, transforms_as="std")
 
-    def predict(self, x_new, fast=False):
-        """Finds the mean and variance of the model via sampling.
-
-        Parameters
-        ----------
-        x_new : array_like
-            The input grid to find the mean and variance predictions on. As
-            this is a "public" method, x_new should _not_ be transformed.
-        fast : bool
-            If True, will take the median of the sampled hyperparameters only
-            instead of running predictions over every sample. This is
-            particularly helpful for situations where each prediction is slow
-            and we can tolerate a coarser approximation. Default is None
-            (defaults to the value set at instantiation).
-
-        Returns
-        -------
-        Two arrays, one for the mean, and the other for the variance of the
-        predictions evaluated on the grid x_new. Also returns the samples
-        themselves, which is a dictionary containing not only sampled
-        hyperparmeters, but also the observations "y".
-        """
-
-        # Note that samples here takes care of the transformations
-        # samples actualy returns transformed results already
-        if fast is None:
-            fast = self.fast_prediction
-        samples = self.sample(x_new, fast=fast)
-        mean = samples["y"].mean(axis=(0, 1))
-        std = samples["y"].std(axis=(0, 1))
-        return mean, std, samples
+        return GPResult(hp=hp, y=y, mu=mu, sd=sd)
 
 
 @define
@@ -483,21 +501,21 @@ class ExactGP(GaussianProcess):
         self._is_fit = True
 
     def _sample_posterior(self, rng_key, x_new, fast=True):
-        samples = self.mcmc.get_samples(group_by_chain=False)
+        hp_samples = self.mcmc.get_samples(group_by_chain=False)
         if fast:
-            samples = {
+            hp_samples = {
                 key: jnp.median(value, keepdims=True)
-                for key, value in samples.items()
+                for key, value in hp_samples.items()
             }
-        chain_length = len(next(iter(samples.values())))
+        chain_length = len(next(iter(hp_samples.values())))
         predictive = jax.vmap(
-            lambda p: self._sample_single_kernel_hp(
+            lambda p: self._sample_gp_given_single_hp(
                 p[0], x_new, p[1], self.gp_samples
             )
         )
         keys = jra.split(rng_key, chain_length)
-        sampled = predictive((keys, samples))
-        return {**samples, "y": sampled}
+        mu, sd, sampled = predictive((keys, hp_samples))
+        return hp_samples, mu, sd, sampled
 
 
 @define
@@ -554,30 +572,7 @@ class VariationalInferenceGP(GaussianProcess):
                 "default."
             )
         kernel_params = self.svi.guide.median(self.kernel_params.params)
-        samples = self._sample_single_kernel_hp(
+        mu, sd, sampled = self._sample_gp_given_single_hp(
             rng_key, x_new, kernel_params, self.gp_samples
         )
-        samples = samples.reshape(1, samples.shape[0], samples.shape[1])
-        kernel_params["y"] = samples
-        return kernel_params
-
-    def predict(self, x_new, fast=False):
-        # Override the default sampling behavior if the model is fit and
-        # the data is provided. SVI is special in that there is only the
-        # median kernel parameters to consider
-
-        if not self._is_fit:
-            # sample will transform x_new for us as well as the samples
-            # themselves
-            sampled = super().sample(x_new, fast=fast)
-            y = sampled["y"]
-            return y.mean(axis=[0, 1]), y.std(axis=[0, 1])
-
-        # here the transforms need to be applied
-        x_new = self.input_transform.forward(x_new, transforms_as="mean")
-        kernel_params = self.svi.guide.median(self.kernel_params.params)
-        mean, cov = self._get_mean_and_covariance(x_new, kernel_params)
-        std = jnp.sqrt(cov.diagonal())
-        mean = self.output_transform.reverse(mean, transforms_as="mean")
-        std = self.output_transform.reverse(std, transforms_as="std")
-        return mean.squeeze(), std.squeeze()
+        return kernel_params, mu, sd, sampled[None, ...]
