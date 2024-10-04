@@ -69,9 +69,9 @@ class AcquisitionFunction(ABC, MSONable):
         d = x.shape[2]
 
         # samples is always of shape (hp_samples, gp_samples, N x q)
-        samples = model.sample(x.reshape(-1, d))
-        samples = samples["y"].reshape(-1, N, self.q)
-        return samples
+        result = model.sample(x.reshape(-1, d))
+        result = result.y.reshape(-1, N, self.q)
+        return result
 
     @abstractmethod
     def _integrand(self, model, x):
@@ -238,10 +238,10 @@ class UpperConfidenceBound(AcquisitionFunction):
     beta = field(default=10.0, validator=[instance_of((int, float)), ge(0.0)])
 
     def _analytic(self, model, x):
-        mean, std = model.predict(x)
+        result = model.sample(x)
         if bool(jnp.isinf(self.beta)):
-            return std
-        return mean + jnp.sqrt(self.beta) * std
+            return result.sd
+        return result.mu + jnp.sqrt(self.beta) * result.sd
 
     def _integrand(self, model, x):
         samples = self._get_integrand_samples(model, x)
@@ -255,13 +255,13 @@ class UpperConfidenceBound(AcquisitionFunction):
 @define
 class ExpectedImprovement(AcquisitionFunction):
     def _analytic(self, model, x):
-        mean, std = model.predict(x)
+        result = model.sample(x)
         y_max = model.y.max()
-        u = (mean - y_max) / std
+        u = (result.mu - y_max) / result.sd
         normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
         ucdf = normal.cdf(u)
         updf = jnp.exp(normal.log_prob(u))
-        acq = std * (updf + u * ucdf)
+        acq = result.sd * (updf + u * ucdf)
         return acq
 
     def _integrand(self, model, x):
