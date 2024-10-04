@@ -41,8 +41,8 @@ def test_ExactGP_sample_shapes(
         gp = gp_factory(kernel=kernel, x=x, y=y, y_std=y_std, **KWARGS)
         gp.fit()
 
-    samples = gp.sample(x_grid)
-    y = samples["y"]
+    result = gp.sample(x_grid)
+    y = result.y
     assert y.ndim == 3
     assert y.shape[0] == HP_SAMPLES
     assert y.shape[1] == GP_SAMPLES
