@@ -34,6 +34,7 @@ from numpyro.infer import (
 from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
+from gpax.acquisition import UpperConfidenceBound
 from gpax.kernels import Kernel
 from gpax.logger import logger
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
@@ -255,36 +256,25 @@ class GaussianProcess(ABC, MSONable):
 
     @staticmethod
     def _standard_condition(k_XX, k_pX, k_pp, y):
-        k_XX_inv = jnp.linalg.inv(k_XX)
-        cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
-        mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
+        with Timer() as t_total:
+            k_XX_inv = jnp.linalg.inv(k_XX)
+            cov = k_pp - jnp.matmul(
+                k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX))
+            )
+            mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
+        logger.debug(f"Standard mean/cov time: {t_total():.02e} s")
         return mean, cov
 
     @staticmethod
     def _cholesky_condition(k_XX, k_pX, k_pp, y):
         with Timer() as t_total:
-            with Timer() as t:
-                k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
-                logger.debug(f"k_XX_cho, {t():.02e} s")
-            with Timer() as t:
-                A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
-                logger.debug(f"A, {t():.02e} s")
-            with Timer() as t:
-                tt = jnp.matmul(k_pX, A)
-                logger.debug(f"tt, {t():.02e} s")
-            with Timer() as t:
-                cov = k_pp - tt  # this is the bottleneck
-                logger.debug(
-                    f"cov, {k_pp.shape}, {k_pX.shape}, {A.shape}, "
-                    f"{cov.shape} {t():.02e} s"
-                )
-            with Timer() as t:
-                B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
-                logger.debug(f"B, {t():.02e} s")
-            with Timer() as t:
-                mean = jnp.matmul(k_pX, B)
-                logger.debug(f"mean, {t():.02e} s")
-        logger.debug(f"Total Cholesky time: {t_total():.02e} s")
+            k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
+            A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
+            tt = jnp.matmul(k_pX, A)
+            cov = k_pp - tt  # this is the bottleneck
+            B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
+            mean = jnp.matmul(k_pX, B)
+        logger.debug(f"Cholesky mean/cov time: {t_total():.02e} s")
         return mean, cov
 
     def _get_mean_and_covariance(self, x_new, kp):

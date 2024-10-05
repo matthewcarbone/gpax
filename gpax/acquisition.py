@@ -23,6 +23,7 @@ from scipy.stats import qmc
 from tqdm import tqdm
 
 from gpax import state
+from gpax.logger import logger
 from gpax.utils import split_array
 
 DATA_TYPES = [jnp.ndarray, np.ndarray]
@@ -180,13 +181,23 @@ class AcquisitionFunction(ABC, MSONable):
 
         halton = qmc.Halton(d=self.bounds.shape[1] * self.q, seed=key)
         samples = halton.random(n=n_samples)
-        l_bounds = self.bounds[0, :].squeeze().tolist()
-        u_bounds = self.bounds[1, :].squeeze().tolist()
+
+        # Need to retile the bounds so that they match the d * q dimension
+        l_bounds = self.bounds[0, :].squeeze()
+        l_bounds = np.tile(l_bounds, self.q)
+        u_bounds = self.bounds[1, :].squeeze()
+        u_bounds = np.tile(u_bounds, self.q)
+
         if self.verbose > 0:
             quality = qmc.discrepancy(samples)
-            print(f"qmc discrepancy (sample quality index) = {quality:.02e}")
+            logger.debug(
+                f"qmc discrepancy (sample quality index) = {quality:.02e}"
+            )
+
         samples = qmc.scale(samples, l_bounds, u_bounds)
         samples = samples.reshape(n_samples, self.q, -1)
+        # for _d in range(self.bounds.shape[1]):
+        #     assert np.all(l_bounds[_d] <= samples[:, :, _d])
         samples_split = split_array(samples, s=self.batch_threshold)
         verbose = self.verbose > 0 and len(samples_split) > 1
 
