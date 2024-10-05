@@ -360,11 +360,13 @@ class GaussianProcess(ABC, MSONable):
     def _sample_prior(self, rng_key, x_new, condition_on_data, fast):
         f = self.kernel.sample_parameters
         hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
+        n_hp_samples = self.hp_samples
         if fast:
             hp_samples = {
                 key: jnp.median(value, keepdims=True)
                 for key, value in hp_samples.items()
             }
+            n_hp_samples = 1
         predictive = jax.vmap(
             lambda p: self._sample_gp_given_single_hp(
                 p[0],
@@ -374,7 +376,7 @@ class GaussianProcess(ABC, MSONable):
                 condition_on_data=condition_on_data,
             )
         )
-        keys = jra.split(rng_key, self.hp_samples)
+        keys = jra.split(rng_key, n_hp_samples)
         mu, sd, sampled = predictive((keys, hp_samples))
         return hp_samples, mu, sd, sampled
 

@@ -101,7 +101,7 @@ class AcquisitionFunction(ABC, MSONable):
         design point x."""
 
         if x.ndim == 2 and self.q == 1:
-            x = x.reshape(x.shape[0], 1, x.shape[1])
+            x = x.reshape(x.shape[0], 1, x.shape[-1])
 
         if x.ndim != 3 or x.shape[1] != self.q:
             raise ValueError(x_shape_err_msg(x, ("N", "q", "d")))
@@ -118,7 +118,7 @@ class AcquisitionFunction(ABC, MSONable):
             raise ValueError("Cannot evaluate analytic expression for q!=1")
 
         if x.ndim == 3 and x.shape[1] == 1:
-            x = x.reshape(x.shape[0], x.shape[1])
+            x = x.reshape(x.shape[0], x.shape[-1])
 
         if x.ndim != 2:
             raise ValueError(x_shape_err_msg(x, ("N", "d")))
