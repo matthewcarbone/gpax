@@ -135,7 +135,7 @@ class Kernel(MSONable, ABC):
 
 
 @define
-class RBFKernel(Kernel):
+class ScaleKernel(Kernel):
     k_scale = field(
         default=dist.LogNormal(0.0, 1.0),
         validator=instance_of((dist.Distribution, int, float)),
@@ -155,29 +155,6 @@ class RBFKernel(Kernel):
             "k_noise": self.k_noise,
             "k_jitter": self.k_jitter,
         }
-
-    @staticmethod
-    def _kernel(
-        X1,
-        X2,
-        k_scale,
-        k_length,
-        k_noise=0.0,
-        k_jitter=1e-6,
-        apply_noise=True,
-        jit=True,
-    ):
-        if jit:
-            _exp = jnp.exp
-            _eye = jnp.eye
-        else:
-            _exp = np.exp
-            _eye = np.eye
-        r2 = _squared_distance(X1, X2, k_length)
-        k = k_scale * _exp(-0.5 * r2)
-        if X1.shape == X2.shape and apply_noise:
-            k += _add_jitter(k_noise, k_jitter) * _eye(X1.shape[0])
-        return k
 
     def sample_parameters(self):
         return {
@@ -204,6 +181,62 @@ class RBFKernel(Kernel):
         are assumed to be distributions."""
 
         return self.kernel(X1, X2, **self.sample_parameters())
+
+
+@define
+class RBFKernel(ScaleKernel):
+    @staticmethod
+    def _kernel(
+        X1,
+        X2,
+        k_scale,
+        k_length,
+        k_noise=0.0,
+        k_jitter=1e-6,
+        apply_noise=True,
+        jit=True,
+    ):
+        if jit:
+            _exp = jnp.exp
+            _eye = jnp.eye
+        else:
+            _exp = np.exp
+            _eye = np.eye
+        r2 = _squared_distance(X1, X2, k_length)
+        k = k_scale * _exp(-0.5 * r2)
+        if X1.shape == X2.shape and apply_noise:
+            k += _add_jitter(k_noise, k_jitter) * _eye(X1.shape[0])
+        return k
+
+
+@define
+class MaternKernel(ScaleKernel):
+    @staticmethod
+    def _kernel(
+        X,
+        Z,
+        k_scale,
+        k_length,
+        k_noise=0.0,
+        k_jitter=1e-6,
+        apply_noise=True,
+        jit=True,
+    ):
+        if jit:
+            _exp = jnp.exp
+            _sqrt = jnp.sqrt
+            _eye = jnp.eye
+        else:
+            _exp = np.exp
+            _sqrt = np.sqrt
+            _eye = np.eye
+        r2 = _squared_distance(X, Z, k_length)
+        r = _sqrt(r2 + 1e-12)
+        sqrt5_r = 5**0.5 * r
+        k = k_scale * (1 + sqrt5_r + (5 / 3) * r2) * _exp(-sqrt5_r)
+        if X.shape == Z.shape and apply_noise:
+            k += _add_jitter(k_noise, k_jitter) * _eye(X.shape[0])
+        return k
 
 
 # @jit

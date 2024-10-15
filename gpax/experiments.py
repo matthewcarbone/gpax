@@ -285,8 +285,9 @@ class SimpleSinusoidal1d(Experiment):
     )
     noise = field(default=0.1, validator=[instance_of((float, int)), ge(0.0)])
 
+    # FIX: this is a problem! You forgot the noise!!!
     def _truth(self, x):
-        return np.sin(10.0 * x).squeeze()
+        return np.atleast_1d(np.sin(10.0 * x).squeeze())
 
     def default_dataset(self, seed=0, num_init_points=25):
         np.random.seed(seed)
@@ -297,6 +298,19 @@ class SimpleSinusoidal1d(Experiment):
         y = f + np.random.normal(0.0, self.noise, num_init_points)
         y = y.squeeze()
         return x, y
+
+
+@define
+class SimpleDecayingSinusoidal1d(Experiment):
+    properties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=1, domain=np.array([-3.0, 3.0]).reshape(-1, 1)
+        )
+    )
+
+    def _truth(self, x):
+        y = np.sin(5 * x + np.pi / 2) * np.exp(-(x**2))
+        return np.atleast_1d(y.squeeze())
 
 
 @define
@@ -318,4 +332,5 @@ class Simple2d(Experiment):
         ) + 2.0 * np.exp(-((x1 - 2) ** 2) - (y1 + 4) ** 2)
         # Constant offset so that the minimum is roughly 0
         const = 0.737922
-        return (res + const) / (2.0 + const)
+        y = (res + const) / (2.0 + const)
+        return np.atleast_1d(y.squeeze())

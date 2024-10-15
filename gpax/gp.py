@@ -34,11 +34,10 @@ from numpyro.infer import (
 from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
-from gpax.acquisition import UpperConfidenceBound
 from gpax.kernels import Kernel
 from gpax.logger import logger
 from gpax.transforms import IdentityTransform, ScaleTransform, Transform
-from gpax.utils import Timer, get_coordinates
+from gpax.utils import time_function
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -50,7 +49,7 @@ Y_STD_DATA_TYPES = tuple(Y_STD_DATA_TYPES)
 
 
 @frozen
-class GPResult(MSONable):
+class GPSample(MSONable):
     """Container for accessing GP results."""
 
     _hp = field(default=None)
@@ -127,8 +126,7 @@ class GaussianProcess(ABC, MSONable):
     )
     verbose = field(default=0, validator=instance_of(int))
     metadata = field(factory=dict)
-    use_cholesky = field(default=True, validator=instance_of(bool))
-    fast_prediction = field(default=False, validator=instance_of(bool))
+    use_cholesky = field(default=False, validator=instance_of(bool))
     _is_fit = field(default=False, validator=instance_of(bool))
 
     def _gp_prior(self, x, y=None):
@@ -153,6 +151,9 @@ class GaussianProcess(ABC, MSONable):
 
     @abstractmethod
     def sample(self): ...
+
+    @abstractmethod
+    def predict(self): ...
 
     @abstractmethod
     def fit(self): ...
@@ -190,19 +191,6 @@ class GaussianProcess(ABC, MSONable):
         # Fit the transformation objects on all provided data
         self._fit_transforms()
         self._class_specific_post_init()
-
-    @property
-    def inducing_points(self):
-        _min_x = self.x.min(axis=0)
-        _max_x = self.x.max(axis=0)
-        domain = jnp.array([_min_x, _max_x])
-        return get_coordinates(self.inducing_points_per_dimension, domain)
-
-    @property
-    def inducing_points_transformed(self):
-        return self.input_transform.forward(
-            self.inducing_points, transforms_as="mean"
-        )
 
     @property
     def x_transformed(self):
@@ -255,28 +243,25 @@ class GaussianProcess(ABC, MSONable):
         return mean, cov
 
     @staticmethod
+    @time_function
     def _standard_condition(k_XX, k_pX, k_pp, y):
-        with Timer() as t_total:
-            k_XX_inv = jnp.linalg.inv(k_XX)
-            cov = k_pp - jnp.matmul(
-                k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX))
-            )
-            mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
-        logger.debug(f"Standard mean/cov time: {t_total():.02e} s")
+        k_XX_inv = jnp.linalg.inv(k_XX)
+        cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
+        mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
         return mean, cov
 
     @staticmethod
+    @time_function
     def _cholesky_condition(k_XX, k_pX, k_pp, y):
-        with Timer() as t_total:
-            k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
-            A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
-            tt = jnp.matmul(k_pX, A)
-            cov = k_pp - tt  # this is the bottleneck
-            B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
-            mean = jnp.matmul(k_pX, B)
-        logger.debug(f"Cholesky mean/cov time: {t_total():.02e} s")
+        k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
+        A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
+        tt = jnp.matmul(k_pX, A)
+        cov = k_pp - tt  # this is the bottleneck
+        B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
+        mean = jnp.matmul(k_pX, B)
         return mean, cov
 
+    @time_function
     def _get_mean_and_covariance(self, x_new, kp):
         """A utility to get the multivariate normal posterior given the GP
         and the training set of data to condition on.
@@ -286,6 +271,8 @@ class GaussianProcess(ABC, MSONable):
         x_new : jnp.ndarray
             A set of points to condition the GP on. As this is a "private"
             method, it is assumed that x_new is already transformed.
+        kp : dict
+            A dictionary containing the kernel hyperparameter samples.
 
         Returns
         -------
@@ -347,7 +334,7 @@ class GaussianProcess(ABC, MSONable):
         )
         return mean, jnp.sqrt(cov.diagonal()), sampled
 
-    def _sample_prior(self, rng_key, x_new, condition_on_data, fast):
+    def _get_hp_samples_from_prior(self, rng_key, fast):
         f = self.kernel.sample_parameters
         hp_samples = Predictive(f, num_samples=self.hp_samples)(rng_key)
         n_hp_samples = self.hp_samples
@@ -357,6 +344,10 @@ class GaussianProcess(ABC, MSONable):
                 for key, value in hp_samples.items()
             }
             n_hp_samples = 1
+        return hp_samples, n_hp_samples
+
+    def _sample_prior(self, rng_key, x_new, condition_on_data, fast):
+        hp_samples, n_hp = self._get_hp_samples_from_prior(rng_key, fast)
         predictive = jax.vmap(
             lambda p: self._sample_gp_given_single_hp(
                 p[0],
@@ -366,7 +357,7 @@ class GaussianProcess(ABC, MSONable):
                 condition_on_data=condition_on_data,
             )
         )
-        keys = jra.split(rng_key, n_hp_samples)
+        keys = jra.split(rng_key, n_hp)
         mu, sd, sampled = predictive((keys, hp_samples))
         return hp_samples, mu, sd, sampled
 
@@ -383,7 +374,18 @@ class GaussianProcess(ABC, MSONable):
         return self._sample_prior(rng_key, x_new, True, fast)
 
     @abstractmethod
-    def _sample_posterior(self): ...
+    def _get_hp_samples_from_posterior(self, fast): ...
+
+    def _sample_posterior(self, rng_key, x_new, fast=True):
+        hp_samples, n_hp = self._get_hp_samples_from_posterior(fast)
+        predictive = jax.vmap(
+            lambda p: self._sample_gp_given_single_hp(
+                p[0], x_new, p[1], self.gp_samples, condition_on_data=True
+            )
+        )
+        keys = jra.split(rng_key, n_hp)
+        mu, sd, sampled = predictive((keys, hp_samples))
+        return hp_samples, mu, sd, sampled
 
     def _pre_sample(self, x_new):
         x_new = jnp.array(x_new)
@@ -391,7 +393,7 @@ class GaussianProcess(ABC, MSONable):
         x_new = jax.device_put(x_new, state.device)
         return rng_key, x_new
 
-    def sample(self, x_new, fast=None):
+    def sample(self, x_new, fast=False):
         """Runs samples over the GP. These samples are some combination of
         results from sampling over the prior (or posterior) distribution of
         hyperparameters, and sampling from a GP assuming fixed hyperparameters.
@@ -430,9 +432,6 @@ class GaussianProcess(ABC, MSONable):
             and observations.
         """
 
-        if fast is None:
-            fast = self.fast_prediction
-
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
 
         rng_key, x_new = self._pre_sample(x_new)
@@ -457,7 +456,46 @@ class GaussianProcess(ABC, MSONable):
         mu = self.output_transform.reverse(mu, transforms_as="mean")
         sd = self.output_transform.reverse(sd, transforms_as="std")
 
-        return GPResult(hp=hp, y=y, mu=mu, sd=sd)
+        return GPSample(hp=hp, y=y, mu=mu, sd=sd)
+
+    def _fast_predict(self, rng_key, x_new):
+        """For an ExactGP, the fast prediction method will use only the
+        median of the sampled hyperparameters. For a VIGP, only the median
+        is used anyway."""
+
+        fast = True
+        if self.x is None and self.y is None:
+            hps, _ = self._get_hp_samples_from_prior(rng_key, fast)
+            condition_on_data = False
+        elif not self._is_fit:
+            hps, _ = self._get_hp_samples_from_prior(rng_key, fast)
+            condition_on_data = True
+        else:
+            hps, _ = self._get_hp_samples_from_posterior(fast)
+            condition_on_data = True
+
+        if condition_on_data:
+            mu, sd = self._get_mean_and_covariance(x_new, hps)
+        else:
+            mu, sd = self._get_mean_and_covariance_unconditioned(x_new, hps)
+        return mu, sd
+
+    def predict(self, x_new, fast=True):
+        if not fast:
+            # Note that sample handles the transforms and whether or not
+            # to sample from the prior or posterior, and whether or not to
+            # condition on the data or not
+            sampled = self.sample(x_new, False)
+            return sampled.mu, sampled.sd
+        # Otherwise, we need to access the particular method's fast_predict
+        # method, whatever that may be!
+        x_new = self.input_transform.forward(x_new, transforms_as="mean")
+        rng_key, x_new = self._pre_sample(x_new)
+        # underscore method assumes data is transformed coming in
+        mu, sd = self._fast_predict(rng_key, x_new)
+        mu = self.output_transform.reverse(mu, transforms_as="mean")
+        sd = self.output_transform.reverse(sd, transforms_as="std")
+        return mu, sd
 
 
 @define
@@ -492,22 +530,15 @@ class ExactGP(GaussianProcess):
         self.metadata["fit_key"] = np.array(key)
         self._is_fit = True
 
-    def _sample_posterior(self, rng_key, x_new, fast=True):
+    def _get_hp_samples_from_posterior(self, fast):
         hp_samples = self.mcmc.get_samples(group_by_chain=False)
         if fast:
             hp_samples = {
                 key: jnp.median(value, keepdims=True)
                 for key, value in hp_samples.items()
             }
-        chain_length = len(next(iter(hp_samples.values())))
-        predictive = jax.vmap(
-            lambda p: self._sample_gp_given_single_hp(
-                p[0], x_new, p[1], self.gp_samples
-            )
-        )
-        keys = jra.split(rng_key, chain_length)
-        mu, sd, sampled = predictive((keys, hp_samples))
-        return hp_samples, mu, sd, sampled
+        n_hp_samples = len(next(iter(hp_samples.values())))
+        return hp_samples, n_hp_samples
 
 
 @define
@@ -556,7 +587,7 @@ class VariationalInferenceGP(GaussianProcess):
         self.metadata["fit_key"] = np.array(rng_key)
         self._is_fit = True
 
-    def _sample_posterior(self, rng_key, x_new, fast):
+    def _get_hp_samples_from_posterior(self, fast):
         if fast:
             logger.warning(
                 "Note setting fast = True for VIGP will do nothing."
@@ -564,7 +595,4 @@ class VariationalInferenceGP(GaussianProcess):
                 "default."
             )
         kernel_params = self.svi.guide.median(self.kernel_params.params)
-        mu, sd, sampled = self._sample_gp_given_single_hp(
-            rng_key, x_new, kernel_params, self.gp_samples
-        )
-        return kernel_params, mu, sd, sampled[None, ...]
+        return kernel_params, 1

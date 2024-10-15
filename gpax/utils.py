@@ -9,11 +9,14 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
 from contextlib import contextmanager
+from functools import wraps
 from itertools import product
 from time import perf_counter
 
 import jax
 import jax.numpy as jnp
+
+from gpax.logger import logger
 
 
 def enable_x64():
@@ -92,6 +95,17 @@ def get_coordinates(points_per_dimension, domain):
 def Timer():
     start = perf_counter()
     yield lambda: perf_counter() - start
+
+
+def time_function(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with Timer() as dt:
+            result = func(*args, **kwargs)
+        logger.debug(f"{func.__qualname__} took {dt():.02e} s")
+        return result
+
+    return wrapper
 
 
 def dict_of_list_to_list_of_dict(d):
