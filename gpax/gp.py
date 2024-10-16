@@ -595,4 +595,7 @@ class VariationalInferenceGP(GaussianProcess):
                 "default."
             )
         kernel_params = self.svi.guide.median(self.kernel_params.params)
+        kernel_params = {
+            key: jnp.atleast_1d(value) for key, value in kernel_params.items()
+        }
         return kernel_params, 1
