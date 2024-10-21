@@ -90,9 +90,9 @@ class GPSample(MSONable):
 
     @cached_property
     def ci(self):
-        """Confidence interval of mu +/- sd."""
+        """Confidence interval of mu +/- 2 sd."""
 
-        return self.mu - self.sd, self.mu + self.sd
+        return self.mu - 2.0 * self.sd, self.mu + 2.0 * self.sd
 
 
 @define

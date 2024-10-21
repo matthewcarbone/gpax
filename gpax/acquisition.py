@@ -53,6 +53,7 @@ class AcquisitionFunction(ABC, MSONable):
     verbose = field(default=0, validator=[instance_of(int), ge(0)])
     batch_threshold = field(default=100, validator=[instance_of(int), gt(0)])
     force_monte_carlo = field(default=False, validator=instance_of(bool))
+    fast = field(default=True, validator=instance_of(bool))
 
     def __attrs_post_init__(self):
         # The shape of bounds should always be two rows by as many columns
@@ -70,7 +71,7 @@ class AcquisitionFunction(ABC, MSONable):
         d = x.shape[2]
 
         # samples is always of shape (hp_samples, gp_samples, N x q)
-        result = model.sample(x.reshape(-1, d))
+        result = model.sample(x.reshape(-1, d), fast=self.fast)
         result = result.y.reshape(-1, N, self.q)
         return result
 
@@ -249,10 +250,10 @@ class UpperConfidenceBound(AcquisitionFunction):
     beta = field(default=10.0, validator=[instance_of((int, float)), ge(0.0)])
 
     def _analytic(self, model, x):
-        result = model.sample(x)
+        mu, sd = model.predict(x, fast=self.fast)
         if bool(jnp.isinf(self.beta)):
-            return result.sd
-        return result.mu + jnp.sqrt(self.beta) * result.sd
+            return sd
+        return mu + jnp.sqrt(self.beta) * sd
 
     def _integrand(self, model, x):
         samples = self._get_integrand_samples(model, x)
@@ -266,7 +267,7 @@ class UpperConfidenceBound(AcquisitionFunction):
 @define
 class ExpectedImprovement(AcquisitionFunction):
     def _analytic(self, model, x):
-        result = model.sample(x)
+        result = model.sample(x, fast=self.fast)
         y_max = model.y.max()
         u = (result.mu - y_max) / result.sd
         normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
