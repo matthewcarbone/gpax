@@ -475,18 +475,18 @@ class GaussianProcess(ABC, MSONable):
             condition_on_data = True
 
         if condition_on_data:
-            mu, sd = self._get_mean_and_covariance(x_new, hps)
+            mu, cov = self._get_mean_and_covariance(x_new, hps)
         else:
-            mu, sd = self._get_mean_and_covariance_unconditioned(x_new, hps)
-        return mu, sd
+            mu, cov = self._get_mean_and_covariance_unconditioned(x_new, hps)
+        return mu, jnp.sqrt(cov.diagonal())
 
-    def predict(self, x_new, fast=True):
+    def predict(self, x_new, fast=False):
         if not fast:
             # Note that sample handles the transforms and whether or not
             # to sample from the prior or posterior, and whether or not to
             # condition on the data or not
             sampled = self.sample(x_new, False)
-            return sampled.mu, sampled.sd
+            return sampled.mu.squeeze(), sampled.sd.squeeze()
         # Otherwise, we need to access the particular method's fast_predict
         # method, whatever that may be!
         x_new = self.input_transform.forward(x_new, transforms_as="mean")
@@ -495,7 +495,7 @@ class GaussianProcess(ABC, MSONable):
         mu, sd = self._fast_predict(rng_key, x_new)
         mu = self.output_transform.reverse(mu, transforms_as="mean")
         sd = self.output_transform.reverse(sd, transforms_as="std")
-        return mu, sd
+        return mu.squeeze(), sd.squeeze()
 
 
 @define
