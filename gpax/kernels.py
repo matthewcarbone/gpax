@@ -102,8 +102,11 @@ def get_parameter_as_float(parameter):
 
 @define
 class Kernel(MSONable, ABC):
+    # This is a reasonable choice for noise since we assume the GP output is
+    # scaled to roughly between -1 and 1. We want to assume little noise as
+    # a prior.
     k_noise = field(
-        default=dist.LogNormal(0.0, 1.0),
+        default=dist.HalfNormal(0.01),
         validator=instance_of((dist.Distribution, int, float)),
     )
     k_jitter = field(default=1e-6, validator=[instance_of(float), gt(0.0)])

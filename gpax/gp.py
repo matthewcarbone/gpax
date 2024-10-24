@@ -36,7 +36,12 @@ from numpyro.infer.autoguide import AutoNormal
 from gpax import state
 from gpax.kernels import Kernel
 from gpax.logger import logger
-from gpax.transforms import IdentityTransform, ScaleTransform, Transform
+from gpax.transforms import (
+    IdentityTransform,
+    NormalizeTransform,
+    ScaleTransform,
+    Transform,
+)
 from gpax.utils import time_function
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
@@ -121,7 +126,7 @@ class GaussianProcess(ABC, MSONable):
         factory=ScaleTransform, validator=instance_of((Transform, type(None)))
     )
     output_transform = field(
-        factory=IdentityTransform,
+        factory=NormalizeTransform,
         validator=instance_of((Transform, type(None))),
     )
     verbose = field(default=0, validator=instance_of(int))
