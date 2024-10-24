@@ -203,7 +203,7 @@ class GaussianProcess(ABC, MSONable):
 
     @property
     def y_std_transformed(self):
-        y_std = self.input_transform.forward(self.y_std, transforms_as="std")
+        y_std = self.output_transform.forward(self.y_std, transforms_as="std")
         if y_std is None:
             return None
         return y_std.squeeze()
@@ -235,7 +235,7 @@ class GaussianProcess(ABC, MSONable):
         k_jitter = kp.pop("k_jitter")
 
         if not self.observation_noise:
-            noise = self.observation_noise
+            noise = 0.0
         else:
             noise = k_noise
         cov = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
@@ -292,7 +292,7 @@ class GaussianProcess(ABC, MSONable):
 
         k_pX = f(x_new, x, apply_noise=False, **kp)
         if not self.observation_noise:
-            noise = self.observation_noise
+            noise = 0.0
         else:
             noise = k_noise
         k_pp = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
