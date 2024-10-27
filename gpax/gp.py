@@ -204,14 +204,14 @@ class GaussianProcess(ABC, MSONable):
     @property
     def y_transformed(self):
         y = self.output_transform.forward(self.y, transforms_as="mean")
-        return y.squeeze()
+        return np.atleast_1d(y.squeeze())
 
     @property
     def y_std_transformed(self):
         y_std = self.output_transform.forward(self.y_std, transforms_as="std")
         if y_std is None:
             return None
-        return y_std.squeeze()
+        return np.atleast_1d(y_std.squeeze())
 
     def _get_mean_and_covariance_unconditioned(self, x_new, kp):
         """A utility to get the multivariate normal prior given the GP mean
@@ -252,6 +252,9 @@ class GaussianProcess(ABC, MSONable):
     def _standard_condition(k_XX, k_pX, k_pp, y):
         k_XX_inv = jnp.linalg.inv(k_XX)
         cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
+        # atleast_1d is to account for the possibility that y is a vector of a
+        # single number
+        # y = jnp.atleast_1d(y)
         mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
         return mean, cov
 
