@@ -24,7 +24,7 @@ from tqdm import tqdm
 
 from gpax import state
 from gpax.logger import logger
-from gpax.utils import split_array
+from gpax.utils.utils import split_array
 
 DATA_TYPES = [jnp.ndarray, np.ndarray]
 

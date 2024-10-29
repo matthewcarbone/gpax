@@ -42,7 +42,7 @@ from gpax.transforms import (
     ScaleTransform,
     Transform,
 )
-from gpax.utils import time_function
+from gpax.utils.utils import time_function
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
