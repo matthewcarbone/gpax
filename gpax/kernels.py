@@ -186,7 +186,7 @@ class RBFKernel(ScaleKernel):
 @define
 class MaternKernel(ScaleKernel):
     @staticmethod
-    def _kernel(
+    def kernel(
         X,
         Z,
         k_scale,

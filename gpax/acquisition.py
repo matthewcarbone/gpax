@@ -253,7 +253,9 @@ class UpperConfidenceBound(AcquisitionFunction):
         mu, sd = model.predict(x, fast=self.fast)
         if bool(jnp.isinf(self.beta)):
             return sd
-        return mu + jnp.sqrt(self.beta) * sd
+        if self.beta == 0.0:
+            return mu
+        return mu + jnp.sqrt(self.beta + 1e-12) * sd
 
     def _integrand(self, model, x):
         samples = self._get_integrand_samples(model, x)
@@ -266,19 +268,30 @@ class UpperConfidenceBound(AcquisitionFunction):
 
 @define
 class ExpectedImprovement(AcquisitionFunction):
+    def _get_y_max(self, model):
+        if model.y is not None:
+            return model.y.max()
+
+        # This is effectively finding the maximum of the prior
+        acqf = UpperConfidenceBound(
+            beta=0.0, q=1, bounds=self.bounds, fast=True
+        )
+        x_star, _ = acqf.optimize(model, n=1000, method="Halton")
+        y_max, _ = model.predict(x_star, fast=True)
+        return y_max
+
     def _analytic(self, model, x):
-        result = model.sample(x, fast=self.fast)
-        y_max = model.y.max()
-        u = (result.mu - y_max) / result.sd
+        mu, sd = model.predict(x, fast=self.fast)
+        y_max = self._get_y_max(model)
+        u = (mu - y_max) / sd
         normal = dist.Normal(jnp.zeros_like(u), jnp.ones_like(u))
         ucdf = normal.cdf(u)
         updf = jnp.exp(normal.log_prob(u))
-        acq = result.sd * (updf + u * ucdf)
-        return acq
+        return sd * updf + (mu - y_max) * ucdf
 
     def _integrand(self, model, x):
         samples = self._get_integrand_samples(model, x)
-        y_max = model.y.max()
+        y_max = self._get_y_max(model)
         f_max_over_q = samples.max(axis=-1)
         where_gt_0 = f_max_over_q > 0
         return (f_max_over_q - y_max) * where_gt_0
