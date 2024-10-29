@@ -23,7 +23,6 @@ from scipy.stats import qmc
 from tqdm import tqdm
 
 from gpax import state
-from gpax.logger import logger
 from gpax.utils.utils import split_array
 
 DATA_TYPES = [jnp.ndarray, np.ndarray]
@@ -191,9 +190,7 @@ class AcquisitionFunction(ABC, MSONable):
 
         if self.verbose > 0:
             quality = qmc.discrepancy(samples)
-            logger.debug(
-                f"qmc discrepancy (sample quality index) = {quality:.02e}"
-            )
+            print(f"qmc discrepancy (sample quality index) = {quality:.02e}")
 
         samples = qmc.scale(samples, l_bounds, u_bounds)
         samples = samples.reshape(n_samples, self.q, -1)

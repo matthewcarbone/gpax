@@ -35,7 +35,6 @@ from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
 from gpax.kernels import Kernel
-from gpax.logger import logger
 from gpax.transforms import (
     IdentityTransform,
     NormalizeTransform,
@@ -562,10 +561,10 @@ class VariationalInferenceGP(GaussianProcess):
 
     def _print_summary(self):
         params_map = self.svi.guide.median(self.kernel_params.params)
-        logger.info("\nInferred GP parameters")
+        print("\nInferred GP parameters")
         for k, vals in params_map.items():
             spaces = " " * (15 - len(k))
-            logger.info(k, spaces, jnp.around(vals, 4))
+            print(k, spaces, jnp.around(vals, 4))
 
     def _class_specific_post_init(self):
         if "b1" not in self.optimizer_kwargs:
@@ -597,10 +596,11 @@ class VariationalInferenceGP(GaussianProcess):
 
     def _get_hp_samples_from_posterior(self, fast):
         if fast:
-            logger.warning(
+            warn(
                 "Note setting fast = True for VIGP will do nothing."
                 "VIGP only uses the median value of the hyperparameters by "
-                "default."
+                "default.",
+                RuntimeWarning,
             )
         kernel_params = self.svi.guide.median(self.kernel_params.params)
         kernel_params = {

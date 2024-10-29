@@ -16,8 +16,6 @@ from time import perf_counter
 import jax
 import jax.numpy as jnp
 
-from gpax.logger import logger
-
 
 def enable_x64():
     """Use double (x64) precision for jax arrays"""
@@ -102,7 +100,7 @@ def time_function(func):
     def wrapper(*args, **kwargs):
         with Timer() as dt:
             result = func(*args, **kwargs)
-        logger.debug(f"{func.__qualname__} took {dt():.02e} s")
+        print(f"{func.__qualname__} took {dt():.02e} s")
         return result
 
     return wrapper
