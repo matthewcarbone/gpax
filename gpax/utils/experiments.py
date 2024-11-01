@@ -282,14 +282,22 @@ class ErrorbarExperiment(Experiment):
     """Identical to the Experiment, except that the result of __call__ not
     only returns the value of the experiment but also a single standard
     deviation: a measure of that value's uncertainty. This also requires
-    a new method, _uncertainty, to be defined as a function of x."""
+    a new method, _uncertainty, to be defined as a function of x, and is
+    validated in the same way that _truth is. Another 'public' method,
+    uncertainty, is also defined for convenience."""
 
     @abstractmethod
     def _uncertainty(self, x):
         raise NotImplementedError
 
+    def uncertainty(self, x):
+        self._validate_input(x)
+        y = self._uncertainty(x)
+        self._validate_output(y)
+        return y
+
     def __call__(self, x):
-        return self.truth(x), self._uncertainty(x)
+        return self.truth(x), self.uncertainty(x)
 
 
 @define
