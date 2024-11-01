@@ -278,6 +278,21 @@ class Experiment(ABC, MSONable):
 
 
 @define
+class ErrorbarExperiment(Experiment):
+    """Identical to the Experiment, except that the result of __call__ not
+    only returns the value of the experiment but also a single standard
+    deviation: a measure of that value's uncertainty. This also requires
+    a new method, _uncertainty, to be defined as a function of x."""
+
+    @abstractmethod
+    def _uncertainty(self, x):
+        raise NotImplementedError
+
+    def __call__(self, x):
+        return self.truth(x), self._uncertainty(x)
+
+
+@define
 class SimpleSinusoidal1d(Experiment):
     properties = field(
         factory=lambda: ExperimentProperties(
@@ -438,9 +453,7 @@ class NegatedBranin2(Experiment):
         )
     )
     # All three optima are the same y_star value
-    metadata = field(
-        default={"x_star": BRANIN_OPTIMA, "y_star": [-0.397887] * 3}
-    )
+    metadata = field(default={"x_star": BRANIN_OPTIMA, "y_star": -0.397887})
 
     def _truth(self, x):
         x1 = x[:, 0]
