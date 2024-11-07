@@ -49,10 +49,14 @@ class AcquisitionFunction(ABC, MSONable):
     penalty_strength = field(
         default=0.0, validator=[ge(0.0), instance_of((float, int))]
     )
-    verbose = field(default=0, validator=[instance_of(int), ge(0)])
     batch_threshold = field(default=100, validator=[instance_of(int), gt(0)])
     force_monte_carlo = field(default=False, validator=instance_of(bool))
     fast = field(default=True, validator=instance_of(bool))
+
+    @property
+    def name(self):
+        n = self.__class__.__name__
+        return f"{n}(q={self.q})"
 
     def __attrs_post_init__(self):
         # The shape of bounds should always be two rows by as many columns
@@ -188,7 +192,7 @@ class AcquisitionFunction(ABC, MSONable):
         u_bounds = self.bounds[1, :].squeeze()
         u_bounds = np.tile(u_bounds, self.q)
 
-        if self.verbose > 0:
+        if state.verbose > 2:
             quality = qmc.discrepancy(samples)
             print(f"qmc discrepancy (sample quality index) = {quality:.02e}")
 
@@ -197,7 +201,7 @@ class AcquisitionFunction(ABC, MSONable):
         # for _d in range(self.bounds.shape[1]):
         #     assert np.all(l_bounds[_d] <= samples[:, :, _d])
         samples_split = split_array(samples, s=self.batch_threshold)
-        verbose = self.verbose > 0 and len(samples_split) > 1
+        verbose = state.verbose == 1 and len(samples_split) > 1
 
         vals = []
         for xx in tqdm(samples_split, disable=not verbose):
@@ -245,6 +249,11 @@ class UpperConfidenceBound(AcquisitionFunction):
     if beta == inf, UCB reduces to the MaximumVariance acquisition function."""
 
     beta = field(default=10.0, validator=[instance_of((int, float)), ge(0.0)])
+
+    @property
+    def name(self):
+        n = self.__class__.__name__
+        return f"{n}(beta={self.beta:.02f}, q={self.q})"
 
     def _analytic(self, model, x):
         mu, sd = model.predict(x, fast=self.fast)

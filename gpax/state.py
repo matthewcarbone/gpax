@@ -1,10 +1,38 @@
 import sys
+from contextlib import contextmanager
 from warnings import warn
 
 import jax
 import numpy as np
 
 _this = sys.modules[__name__]
+KEY_MAX = 2**32 - 1
+
+
+def _initialize_warnings_cache():
+    _this.warnings = []
+
+
+VERBOSITY_LEVELS = {"debug": 2, "normal": 1, "silent": 0}
+
+
+def set_verbosity(mode="normal"):
+    assert isinstance(mode, str)
+    mode = mode.lower()
+    _this.verbose = VERBOSITY_LEVELS[mode]
+
+
+@contextmanager
+def silent_mode():
+    reversed_verbosity_levels = {
+        value: key for key, value in VERBOSITY_LEVELS.items()
+    }
+    previous_verbosity = _this.verbose
+    try:
+        set_verbosity("silent")
+        yield
+    finally:
+        set_verbosity(reversed_verbosity_levels[previous_verbosity])
 
 
 # TODO: multi-gpu support?
@@ -22,7 +50,7 @@ def set_device(device):
 def set_rng_key(key):
     assert isinstance(key, int)
     assert key >= 0
-    assert key <= 2**32 - 1
+    assert key < KEY_MAX
     _this.rng_key = key
 
 
@@ -52,7 +80,7 @@ def get_rng_key():
 
     # Get a new numpy key
     np.random.seed(key)
-    new_key = np.random.randint(low=0, high=2**32 - 1)
+    new_key = np.random.randint(low=0, high=KEY_MAX)
     new_jax_key = jax.random.key(new_key)
 
     _this.rng_key = new_key
@@ -60,5 +88,7 @@ def get_rng_key():
     return new_key, new_jax_key
 
 
+set_verbosity("normal")
 set_device("cpu")
 set_rng_key(0)
+_initialize_warnings_cache()

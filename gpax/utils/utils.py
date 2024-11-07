@@ -8,6 +8,8 @@ Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
+import sys
+import warnings
 from contextlib import contextmanager
 from functools import wraps
 from itertools import product
@@ -15,6 +17,8 @@ from time import perf_counter
 
 import jax
 import jax.numpy as jnp
+
+from gpax import state
 
 
 def enable_x64():
@@ -89,18 +93,49 @@ def get_coordinates(points_per_dimension, domain):
     return scale_by_domain(jnp.array([xx for xx in gen]), domain)
 
 
-@contextmanager
-def Timer():
-    start = perf_counter()
-    yield lambda: perf_counter() - start
+class Timer:
+    def __enter__(self):
+        self.t0 = perf_counter()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        tf = perf_counter()
+        self.elapsed = tf - self.t0
 
 
 def time_function(func):
     @wraps(func)
     def wrapper(*args, **kwargs):
-        with Timer() as dt:
+        with Timer() as timer:
             result = func(*args, **kwargs)
-        print(f"{func.__qualname__} took {dt():.02e} s")
+        if state.verbose > 1:
+            print(f"{func.__qualname__} took {timer.elapsed:.02e} s")
+        return result
+
+    return wrapper
+
+
+def delay_warnings(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        with warnings.catch_warnings(record=True) as captured_warnings:
+            warnings.simplefilter("always")
+            result = func(*args, **kwargs)
+        seen_warnings = set()
+        unique_warnings = []
+        for w in captured_warnings:
+            key = (str(w.message), w.category, w.filename, w.lineno, w.line)
+            if key not in seen_warnings:
+                unique_warnings.append(w)
+        for w in unique_warnings:
+            warnings.showwarning(
+                message=w.message,
+                category=w.category,
+                filename=w.filename,
+                lineno=w.lineno,
+                file=sys.stderr,
+                line=w.lilne,
+            )
         return result
 
     return wrapper

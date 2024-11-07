@@ -128,7 +128,6 @@ class GaussianProcess(ABC, MSONable):
         factory=NormalizeTransform,
         validator=instance_of((Transform, type(None))),
     )
-    verbose = field(default=0, validator=instance_of(int))
     metadata = field(factory=dict)
     use_cholesky = field(default=False, validator=instance_of(bool))
     _is_fit = field(default=False, validator=instance_of(bool))
@@ -524,7 +523,7 @@ class ExactGP(GaussianProcess):
             num_samples=self.hp_samples,
             num_chains=self.num_chains,
             chain_method=self.chain_method,
-            progress_bar=self.verbose > 0,
+            progress_bar=state.verbose > 0,
             jit_model_args=False,
         )
         x, y = self.x_transformed, self.y_transformed
@@ -532,7 +531,7 @@ class ExactGP(GaussianProcess):
         y = jax.device_put(y, state.device)
         key, rng_key = state.get_rng_key()
         self.mcmc.run(rng_key, x, y, **self.mcmc_run_kwargs)
-        if self.verbose > 0:
+        if state.verbose > 0:
             self.mcmc.print_summary()
         self.metadata["fit_key"] = np.array(key)
         self._is_fit = True
@@ -587,9 +586,9 @@ class VariationalInferenceGP(GaussianProcess):
         self.svi = SVI(self._gp_prior, guide=guide, optim=optim, loss=loss)
         x, y = self.x_transformed, self.y_transformed
         self.kernel_params = self.svi.run(
-            rng_key, self.num_steps, progress_bar=self.verbose > 0, x=x, y=y
+            rng_key, self.num_steps, progress_bar=state.verbose > 0, x=x, y=y
         )
-        if self.verbose > 0:
+        if state.verbose > 0:
             self._print_summary()
         self.metadata["fit_key"] = np.array(rng_key)
         self._is_fit = True
