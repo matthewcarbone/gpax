@@ -68,10 +68,14 @@ class Kernel(Prior, ABC):
         """Radial basis function kernel prior. The parameters of this function
         are assumed to be distributions."""
 
-        return self.kernel(x1, x2, **self.sample_parameters())
+        return self.__call__(x1, x2, **self.sample_parameters())
 
     @abstractmethod
-    def kernel(self): ...
+    def _kernel_function(self, x1, x2, **params):
+        raise NotImplementedError
+
+    def __call__(self, x1, x2, **params):
+        return self._kernel_function(x1, x2, **params)
 
 
 @define
@@ -88,8 +92,8 @@ class ScaleKernel(Kernel):
 
 @define
 class RBFKernel(ScaleKernel):
-    @staticmethod
-    def kernel(
+    def _kernel_function(
+        self,
         X1,
         X2,
         k_scale,
@@ -107,8 +111,8 @@ class RBFKernel(ScaleKernel):
 
 @define
 class MaternKernel(ScaleKernel):
-    @staticmethod
-    def kernel(
+    def _kernel_function(
+        self,
         X,
         Z,
         k_scale,

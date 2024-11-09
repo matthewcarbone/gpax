@@ -35,7 +35,7 @@ from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
 from gpax.kernels import Kernel
-from gpax.means import Mean, ZeroMean
+from gpax.means import ConstantMean, Mean
 from gpax.transforms import (
     IdentityTransform,
     NormalizeTransform,
@@ -131,7 +131,7 @@ class GaussianProcess(ABC, MSONable):
     )
     metadata = field(factory=dict)
     use_cholesky = field(default=False, validator=instance_of(bool))
-    mean = field(default=ZeroMean(), validator=instance_of(Mean))
+    mean = field(default=ConstantMean(), validator=instance_of(Mean))
     _is_fit = field(default=False, validator=instance_of(bool))
 
     def _gp_prior(self, x, y=None):
@@ -234,7 +234,7 @@ class GaussianProcess(ABC, MSONable):
         mean_params = {k: v for k, v in params.items() if "m_" in k}
         kernel_params = {k: v for k, v in params.items() if "k_" in k}
 
-        mean = self.mean.mean(x_new, **mean_params)
+        mean = self.mean(x_new, **mean_params)
 
         # Handle special case of noise and jitter for the kernel
         k_noise = kernel_params.pop("k_noise")
@@ -243,7 +243,7 @@ class GaussianProcess(ABC, MSONable):
             noise = 0.0
         else:
             noise = k_noise
-        f = self.kernel.kernel
+        f = self.kernel
         cov = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kernel_params)
 
         return mean, cov
@@ -279,11 +279,11 @@ class GaussianProcess(ABC, MSONable):
         k_jitter = k_params.pop("k_jitter")
 
         # Handle the mean function
-        m_train = self.mean.mean(x, **m_params)
-        m_new = self.mean.mean(x_new, **m_params)
+        m_train = self.mean(x, **m_params)
+        m_new = self.mean(x_new, **m_params)
 
         # Handle the covariance function
-        f = self.kernel.kernel
+        f = self.kernel
         k_cross = f(x_new, x, apply_noise=False, **k_params)
         if not self.observation_noise:
             noise = 0.0
