@@ -16,11 +16,11 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
-import numpyro
 import numpyro.distributions as dist
 from attrs import define, field
-from attrs.validators import gt, instance_of
-from monty.json import MSONable
+from attrs.validators import instance_of
+
+from gpax.utils.prior_utils import Parameter, Prior
 
 
 def _add_jitter(x, jitter=1e-6):
@@ -50,66 +50,25 @@ def _squared_distance(X, Z, lengthscale):
     return r2.clip(0)
 
 
-def get_parameter_prior(name, distribution, plate_dims=1):
-    """A utility function for getting a numpyro prior from a provided
-    distribution. Floats and ints are interpreted as deterministic values.
-
-    Parameters
-    ----------
-    name : str
-        The name of the variable
-    distribution : numpyro.distributions.Distribution or float or int
-        The prior distribution to sample from. This is interpreted as
-        numpyro.deterministic if float or int.
-    plate_dims : int
-        The number of dimensions to run the numpyro plate primitive over.
-        Defaults to 1.
-
-    Returns
-    -------
-    Some numpyro object depending on whether or not distribution is a true
-    distribution or just some constant value.
-    """
-
-    if isinstance(distribution, (float, int)):
-        return numpyro.deterministic(name, jnp.array(distribution))
-
-    if not isinstance(distribution, numpyro.distributions.Distribution):
-        raise ValueError(
-            f"Provided distribution {distribution} was not of type float, "
-            "int, or numpyro.distribution.Distribution, but is required to "
-            "be one of these types."
-        )
-
-    # Otherwise, the provided distribution is a numpyro distribution object
-    if plate_dims == 1:
-        return numpyro.sample(name, distribution)
-
-    with numpyro.plate(f"{name}_plate", plate_dims):
-        return numpyro.sample(name, distribution)
-
-
-def get_parameter_as_float(parameter):
-    """Converts a provided parameter, potentially a numpyro distribution,
-    into a 'reduced' representation. This will either be simply the provided
-    parameter if constant (float or int), or the mean of a distribution if
-    parameter is of type numpyro.distributions.Distribution."""
-
-    if isinstance(parameter, numpyro.distributions.Distribution):
-        return parameter.mean
-    return parameter
-
-
 @define
-class Kernel(MSONable, ABC):
-    # This is a reasonable choice for noise since we assume the GP output is
-    # scaled to roughly between -1 and 1. We want to assume little noise as
-    # a prior.
+class Kernel(Prior, ABC):
+    """Base kernel object. All kernels should inherit from this class. Note
+    that any class attribute beginning with ``k_`` will be interpreted as
+    a kernel parameter (either a numpyro distribution or a constant)."""
+
     k_noise = field(
-        default=dist.HalfNormal(0.01),
-        validator=instance_of((dist.Distribution, int, float)),
+        default=Parameter(dist.HalfNormal(0.01), 1),
+        validator=instance_of(Parameter),
     )
-    k_jitter = field(default=1e-6, validator=[instance_of(float), gt(0.0)])
+    k_jitter = field(
+        default=Parameter(1.0e-6, 1), validator=instance_of(Parameter)
+    )
+
+    def sample_prior(self, x1, x2):
+        """Radial basis function kernel prior. The parameters of this function
+        are assumed to be distributions."""
+
+        return self.kernel(x1, x2, **self.sample_parameters())
 
     @abstractmethod
     def kernel(self): ...
@@ -118,50 +77,13 @@ class Kernel(MSONable, ABC):
 @define
 class ScaleKernel(Kernel):
     k_scale = field(
-        default=dist.LogNormal(0.0, 1.0),
-        validator=instance_of((dist.Distribution, int, float)),
+        default=Parameter(dist.LogNormal(0.0, 1.0)),
+        validator=instance_of(Parameter),
     )
-    k_scale_dims = field(default=1, validator=[instance_of(int), gt(0)])
     k_length = field(
-        default=dist.LogNormal(0.0, 1.0),
-        validator=instance_of((dist.Distribution, int, float)),
+        default=Parameter(dist.LogNormal(0.0, 1.0)),
+        validator=instance_of(Parameter),
     )
-    k_length_dims = field(default=1, validator=[instance_of(int), gt(0)])
-
-    @property
-    def kernel_params(self):
-        return {
-            "k_scale": self.k_scale,
-            "k_length": self.k_length,
-            "k_noise": self.k_noise,
-            "k_jitter": self.k_jitter,
-        }
-
-    def sample_parameters(self):
-        return {
-            "k_scale": get_parameter_prior(
-                "k_scale", self.k_scale, self.k_scale_dims
-            ),
-            "k_length": get_parameter_prior(
-                "k_length", self.k_length, self.k_length_dims
-            ),
-            "k_noise": get_parameter_prior("k_noise", self.k_noise, 1),
-            "k_jitter": get_parameter_prior("k_jitter", self.k_jitter, 1),
-        }
-
-    def get_sample_parameter_means(self):
-        return {
-            "k_scale": get_parameter_as_float(self.k_scale),
-            "k_length": get_parameter_as_float(self.k_length),
-            "k_noise": get_parameter_as_float(self.k_noise),
-            "k_jitter": get_parameter_as_float(self.k_jitter),
-        }
-
-    def sample_prior(self, X1, X2):
-        """Radial basis function kernel prior. The parameters of this function
-        are assumed to be distributions."""
-
-        return self.kernel(X1, X2, **self.sample_parameters())
 
 
 @define
@@ -204,16 +126,6 @@ class MaternKernel(ScaleKernel):
         return k
 
 
-# @jit
-# def _matern_kernel(X, Z, k_scale, k_length, noise, jitter):
-#     r2 = _squared_distance(X / k_length, Z / k_length)
-#     r = _sqrt(r2)
-#     sqrt5_r = 5**0.5 * r
-#     k = k_scale * (1 + sqrt5_r + (5 / 3) * r2) * jnp.exp(-sqrt5_r)
-#     if X.shape == Z.shape:
-#         k += _add_jitter(noise, jitter) * jnp.eye(X.shape[0])
-#     return k
-#
 #
 # @jit
 # def _periodic_kernel(X, Z, k_scale, k_length, k_period, noise, jitter):

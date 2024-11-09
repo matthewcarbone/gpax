@@ -17,7 +17,6 @@ def test_ExactGP_sample_shapes(
     HP_SAMPLES = 17
     GP_SAMPLES = 33
     KWARGS = {
-        "verbose": 1,
         "hp_samples": HP_SAMPLES,
         "gp_samples": GP_SAMPLES,
     }

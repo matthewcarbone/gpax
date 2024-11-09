@@ -35,6 +35,7 @@ from numpyro.infer.autoguide import AutoNormal
 
 from gpax import state
 from gpax.kernels import Kernel
+from gpax.means import Mean, ZeroMean
 from gpax.transforms import (
     IdentityTransform,
     NormalizeTransform,
@@ -130,6 +131,7 @@ class GaussianProcess(ABC, MSONable):
     )
     metadata = field(factory=dict)
     use_cholesky = field(default=False, validator=instance_of(bool))
+    mean = field(default=ZeroMean(), validator=instance_of(Mean))
     _is_fit = field(default=False, validator=instance_of(bool))
 
     def _gp_prior(self, x, y=None):
@@ -144,7 +146,7 @@ class GaussianProcess(ABC, MSONable):
             The optional points to condition the model on.
         """
 
-        m = jnp.zeros(x.shape[0])
+        m = self.mean.sample_prior(x)
         k = self.kernel.sample_prior(x, x)
         return numpyro.sample(
             "y_sampled",
@@ -211,7 +213,7 @@ class GaussianProcess(ABC, MSONable):
             return None
         return np.atleast_1d(y_std.squeeze())
 
-    def _get_mean_and_covariance_unconditioned(self, x_new, kp):
+    def _get_mean_and_covariance_unconditioned(self, x_new, params):
         """A utility to get the multivariate normal prior given the GP mean
         function (which for now is just 0) and the pre-set kernel parameter
         priors.
@@ -228,47 +230,26 @@ class GaussianProcess(ABC, MSONable):
             Two jnp.ndarrays for the mean and covariance matrix, respectively.
         """
 
-        # TODO: eventually reincorporate the mean function functionality
-        mean = jnp.zeros(x_new.shape[0])
+        params = deepcopy(params)
+        mean_params = {k: v for k, v in params.items() if "m_" in k}
+        kernel_params = {k: v for k, v in params.items() if "k_" in k}
 
-        f = self.kernel.kernel
-        kp = deepcopy(kp)  # Kernel params
+        mean = self.mean.mean(x_new, **mean_params)
 
-        k_noise = kp.pop("k_noise")
-        k_jitter = kp.pop("k_jitter")
-
+        # Handle special case of noise and jitter for the kernel
+        k_noise = kernel_params.pop("k_noise")
+        k_jitter = kernel_params.pop("k_jitter")
         if not self.observation_noise:
             noise = 0.0
         else:
             noise = k_noise
-        cov = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
+        f = self.kernel.kernel
+        cov = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kernel_params)
 
         return mean, cov
 
-    @staticmethod
     @time_function
-    def _standard_condition(k_XX, k_pX, k_pp, y):
-        k_XX_inv = jnp.linalg.inv(k_XX)
-        cov = k_pp - jnp.matmul(k_pX, jnp.matmul(k_XX_inv, jnp.transpose(k_pX)))
-        # atleast_1d is to account for the possibility that y is a vector of a
-        # single number
-        # y = jnp.atleast_1d(y)
-        mean = jnp.matmul(k_pX, jnp.matmul(k_XX_inv, y))
-        return mean, cov
-
-    @staticmethod
-    @time_function
-    def _cholesky_condition(k_XX, k_pX, k_pp, y):
-        k_XX_cho = jax.scipy.linalg.cho_factor(k_XX)
-        A = jax.scipy.linalg.cho_solve(k_XX_cho, k_pX.T)
-        tt = jnp.matmul(k_pX, A)
-        cov = k_pp - tt  # this is the bottleneck
-        B = jax.scipy.linalg.cho_solve(k_XX_cho, y)
-        mean = jnp.matmul(k_pX, B)
-        return mean, cov
-
-    @time_function
-    def _get_mean_and_covariance(self, x_new, kp):
+    def _get_mean_and_covariance(self, x_new, params):
         """A utility to get the multivariate normal posterior given the GP
         and the training set of data to condition on.
 
@@ -277,8 +258,8 @@ class GaussianProcess(ABC, MSONable):
         x_new : jnp.ndarray
             A set of points to condition the GP on. As this is a "private"
             method, it is assumed that x_new is already transformed.
-        kp : dict
-            A dictionary containing the kernel hyperparameter samples.
+        params : dict
+            A dictionary containing the mean and kernel hyperparameter samples.
 
         Returns
         -------
@@ -286,37 +267,57 @@ class GaussianProcess(ABC, MSONable):
             Two jnp.ndarrays for the mean and covariance matrix, respectively.
         """
 
-        f = self.kernel.kernel
-        kp = deepcopy(kp)  # Kernel params
-
-        k_noise = kp.pop("k_noise")
-        k_jitter = kp.pop("k_jitter")
+        params = deepcopy(params)
+        m_params = {k: v for k, v in params.items() if "m_" in k}
+        k_params = {k: v for k, v in params.items() if "k_" in k}
 
         x = self.x_transformed
         y = self.y_transformed
         y_std = self.y_std_transformed
 
-        k_pX = f(x_new, x, apply_noise=False, **kp)
+        k_noise = k_params.pop("k_noise")
+        k_jitter = k_params.pop("k_jitter")
+
+        # Handle the mean function
+        m_train = self.mean.mean(x, **m_params)
+        m_new = self.mean.mean(x_new, **m_params)
+
+        # Handle the covariance function
+        f = self.kernel.kernel
+        k_cross = f(x_new, x, apply_noise=False, **k_params)
         if not self.observation_noise:
             noise = 0.0
         else:
             noise = k_noise
-        k_pp = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **kp)
+        k_new = f(x_new, x_new, k_noise=noise, k_jitter=k_jitter, **k_params)
 
         if y_std is not None:
             noise = y_std**2
         else:
             noise = k_noise
-        k_XX = f(x, x, k_noise=noise, k_jitter=k_jitter, **kp)
+        k_train = f(x, x, k_noise=noise, k_jitter=k_jitter, **k_params)
 
         if self.use_cholesky:
-            mean, cov = self._cholesky_condition(k_XX, k_pX, k_pp, y)
+            k_XX_cho = jax.scipy.linalg.cho_factor(k_train)
+            A = jax.scipy.linalg.cho_solve(k_XX_cho, k_cross.T)
+            tt = jnp.matmul(k_cross, A)
+            cov = k_new - tt  # this is the bottleneck
+            B = jax.scipy.linalg.cho_solve(k_XX_cho, y - m_train)
+            mean = m_new + jnp.matmul(k_cross, B)
+
         else:
-            mean, cov = self._standard_condition(k_XX, k_pX, k_pp, y)
+            k_XX_inv = jnp.linalg.inv(k_train)
+            cov = k_new - jnp.matmul(
+                k_cross, jnp.matmul(k_XX_inv, jnp.transpose(k_cross))
+            )
+            mean = m_new + jnp.matmul(
+                k_cross, jnp.matmul(k_XX_inv, y - m_train)
+            )
+
         return mean, cov
 
     def _sample_gp_given_single_hp(
-        self, rng_key, x_new, kernel_params, n, condition_on_data=True
+        self, rng_key, x_new, params, n, condition_on_data=True
     ):
         """Execute random samples over the GP for an explicit set of kernel
         parameters. As this is a "private" method, it is assumed x_new is
@@ -326,14 +327,15 @@ class GaussianProcess(ABC, MSONable):
         method.
         """
 
-        # Revert to the prior distribution if no updated kernel parameters
-        # are provided
-        kernel_params = {**self.kernel.kernel_params, **kernel_params}
+        # Revert to the prior distribution if no updated parameters are given
+        # Note that these will always be constants since if they weren't,
+        # they'd be included in the MCMC simulation or training.
+        params = {**self.mean.params, **self.kernel.params, **params}
         if condition_on_data:
-            mean, cov = self._get_mean_and_covariance(x_new, kp=kernel_params)
+            mean, cov = self._get_mean_and_covariance(x_new, params=params)
         else:
             mean, cov = self._get_mean_and_covariance_unconditioned(
-                x_new, kp=kernel_params
+                x_new, params=params
             )
         sampled = dist.MultivariateNormal(mean, cov).sample(
             rng_key, sample_shape=(n,)
