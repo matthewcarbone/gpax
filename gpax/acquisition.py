@@ -192,7 +192,7 @@ class AcquisitionFunction(ABC, MSONable):
         u_bounds = self.bounds[1, :].squeeze()
         u_bounds = np.tile(u_bounds, self.q)
 
-        if state.verbose > 2:
+        if state.verbose > 1:
             quality = qmc.discrepancy(samples)
             print(f"qmc discrepancy (sample quality index) = {quality:.02e}")
 
@@ -201,7 +201,7 @@ class AcquisitionFunction(ABC, MSONable):
         # for _d in range(self.bounds.shape[1]):
         #     assert np.all(l_bounds[_d] <= samples[:, :, _d])
         samples_split = split_array(samples, s=self.batch_threshold)
-        verbose = state.verbose == 1 and len(samples_split) > 1
+        verbose = state.verbose > 0 and len(samples_split) > 1
 
         vals = []
         for xx in tqdm(samples_split, disable=not verbose):
@@ -209,6 +209,8 @@ class AcquisitionFunction(ABC, MSONable):
             # necessary transforms on the data
             vals.append(self.__call__(model, xx))
         vals = jnp.array(vals).flatten()
+        # print(vals)
+        # print(vals.argmax())
         argmax = vals.argmax()
 
         return samples[argmax, ...], vals[argmax].item()

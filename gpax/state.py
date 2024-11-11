@@ -35,6 +35,19 @@ def silent_mode():
         set_verbosity(reversed_verbosity_levels[previous_verbosity])
 
 
+@contextmanager
+def debug_mode():
+    reversed_verbosity_levels = {
+        value: key for key, value in VERBOSITY_LEVELS.items()
+    }
+    previous_verbosity = _this.verbose
+    try:
+        set_verbosity("debug")
+        yield
+    finally:
+        set_verbosity(reversed_verbosity_levels[previous_verbosity])
+
+
 # TODO: multi-gpu support?
 def set_device(device):
     try:

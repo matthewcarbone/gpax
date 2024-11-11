@@ -1,13 +1,22 @@
 """
-kernels.py
-==========
+Kernels
+=======
 
-Kernel functions
+Kernels used for GPs.
 
-Note that the defined priors and parameters of the Kernel functions pertain
-to data _after_ transforms specified in the GP are applied. In other words,
-a k_length parameter of 1.0 would be the prior after the data is scaled or
-transformed by whatever transformation is specified in the GP.
+.. note::
+
+    The defined priors and parameters of the Kernel functions pertain to data
+    _after_ transforms specified in the GP are applied. In other words,
+    a k_length parameter of 1.0 would be the prior after the data is scaled or
+    transformed by whatever transformation is specified in the GP.
+
+.. note::
+
+    In order to register as a parameter that numpyro can learn during
+    inference, it must begin with the prefix ``"k_"``. If it does not start
+    with this prefix, it is assumed to be a constant to the class.
+
 
 Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
 Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
@@ -20,7 +29,7 @@ import numpyro.distributions as dist
 from attrs import define, field
 from attrs.validators import instance_of
 
-from gpax.utils.prior_utils import Parameter, Prior
+from gpax.utils.prior_utils import KernelPrior, Parameter
 
 
 def _add_jitter(x, jitter=1e-6):
@@ -51,7 +60,7 @@ def _squared_distance(X, Z, lengthscale):
 
 
 @define
-class Kernel(Prior, ABC):
+class Kernel(KernelPrior, ABC):
     """Base kernel object. All kernels should inherit from this class. Note
     that any class attribute beginning with ``k_`` will be interpreted as
     a kernel parameter (either a numpyro distribution or a constant)."""

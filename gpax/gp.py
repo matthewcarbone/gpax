@@ -42,7 +42,6 @@ from gpax.transforms import (
     ScaleTransform,
     Transform,
 )
-from gpax.utils.utils import time_function
 
 clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
@@ -248,7 +247,6 @@ class GaussianProcess(ABC, MSONable):
 
         return mean, cov
 
-    @time_function
     def _get_mean_and_covariance(self, x_new, params):
         """A utility to get the multivariate normal posterior given the GP
         and the training set of data to condition on.

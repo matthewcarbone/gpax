@@ -9,6 +9,7 @@ contains abstractions over mean and kernel functions in the form of the
 Created by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
 
+from abc import ABC, abstractproperty
 from functools import cached_property
 
 import jax.numpy as jnp
@@ -105,16 +106,19 @@ class Parameter(MSONable):
 
 
 @define
-class Prior(MSONable):
+class Prior(ABC, MSONable):
     """Base class representing any prior used in GPax. This can be, for
     instance, a mean prior, or a kernel prior, used in a Gaussian Process."""
 
-    @cached_property
+    @abstractproperty
+    def attribute_prefix(self):
+        raise NotImplementedError
+
     def _params(self):
         keys = self.as_dict().keys()
         params = {}
         for key in keys:
-            if "@" in key:
+            if "@" in key or not key.startswith(self.attribute_prefix):
                 continue
             obj = getattr(self, key)
             if isinstance(obj, Parameter):
@@ -150,3 +154,15 @@ class Prior(MSONable):
         return {
             k: get_parameter_as_float(v.value) for k, v in self._params.items()
         }
+
+
+@define
+class MeanPrior(Prior):
+    def attribute_prefix(self):
+        return "m_"
+
+
+@define
+class KernelPrior(Prior):
+    def attribute_prefix(self):
+        return "k_"
