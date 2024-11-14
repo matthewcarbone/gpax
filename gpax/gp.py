@@ -11,7 +11,9 @@ Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
-from functools import cached_property
+from dataclasses import dataclass
+from functools import cache, cached_property
+from typing import Union
 from warnings import warn
 
 import jax
@@ -52,32 +54,30 @@ DATA_TYPES = tuple(DATA_TYPES)
 Y_STD_DATA_TYPES = tuple(Y_STD_DATA_TYPES)
 
 
-@frozen
+@dataclass
 class GPSample(MSONable):
     """Container for accessing GP results."""
 
-    _hp = field(default=None)
-    _y = field(default=None)
-    _mu = field(default=None)
-    _sd = field(default=None)
+    hp: list = field(default_factory=list)
+    """Samples of the hyperparameters.
 
+    :type: :obj:`list`
+    """
+
+    y: list = None
+    """Samples over the GP. The shape of the returned array is
+    (hp, gp, L), where n_hp indexes the kernel hyperparameter, gp indexes
+    the sample from the GP, and L indexes the spatial component of the
+    stochastic process."""
+
+    _mu: list = None
+    """This is a atest!"""
+
+    _sd: list = None
+
+    @cache
     @property
-    def y(self):
-        """Samples over the GP. The shape of the returned array is
-        (hp, gp, L), where n_hp indexes the kernel hyperparameter, gp indexes
-        the sample from the GP, and L indexes the spatial component of the
-        stochastic process."""
-
-        return self._y
-
-    @property
-    def hp(self):
-        """Samples of the hyperparameters."""
-
-        return self._hp
-
-    @cached_property
-    def mu(self):
+    def mu(self) -> Union[list, np.ndarray, jnp.array]:
         """The mean of the GP."""
 
         if self._y.shape[0] == 1:
@@ -101,20 +101,14 @@ class GPSample(MSONable):
 
 @define
 class GaussianProcess(ABC, MSONable):
-    """Core Gaussian process class.
+    """Core Gaussian process class."""
 
-    Parameters
-    ----------
-    hp_samples : int
-        The number of samples to take over the distribution of hyper
-        parameters. This also corresponds to the chain length in MCMC
-        posterior sampling - in that case, this argument is ignored.
-    gp_samples : int
-        The number of samples over the GP to take for each sampled
-        hyperparameter.
+    kernel: Kernel = field(validator=instance_of(Kernel))
+    """Testing out the new documentation!
+
+    :type: :py:class:`~Kernel`
     """
 
-    kernel = field(validator=instance_of(Kernel))
     x = field(default=None, validator=instance_of(DATA_TYPES))
     y = field(default=None, validator=instance_of(DATA_TYPES))
     y_std = field(default=None, validator=instance_of(Y_STD_DATA_TYPES))

@@ -46,7 +46,7 @@ napoleon_google_docstring = False
 intersphinx_mapping = {
     "python": ("https://docs.python.org/3.10", None),
     "sphinx": ("https://www.sphinx-doc.org/en/master", None),
-    "numpy": ("https://numpy.org/doc/stable/", None),
+    "numpy": ("https://numpy.org/doc/stable", None),
     "numpyro": ("https://num.pyro.ai/en/stable", None),
     "markdown_it": ("https://markdown-it-py.readthedocs.io/en/latest", None),
 }

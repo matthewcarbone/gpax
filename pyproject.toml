@@ -28,7 +28,6 @@ dependencies = [
     "dunamai==1.19.2",
     "jaxopt",
     "monty",
-    "attrs",
     "loguru",
 ]
 
@@ -40,6 +39,20 @@ test = [
     "jaxlib",
     "pytest",
     "pytest-cov",
+    "ruff",
+]
+doc = [
+    "sphinx",
+    "numpydoc",
+    "sphinx-copybutton",
+    "ipython",
+    "matplotlib",
+    "myst-parser",
+    "sphinx-autodoc2",
+    "dunamai==1.19.2",
+    "linkify-it-py~=2.0",
+    "sphinx-book-theme",
+    "sphinx-autodoc-typehints",
 ]
 
 [tool.ruff]

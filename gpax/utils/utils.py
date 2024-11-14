@@ -12,7 +12,6 @@ from typing import Any
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from numpy.typing import ArrayLike
 
 
@@ -91,8 +90,8 @@ def scale_by_domain(x: ArrayLike, domain: ArrayLike) -> ArrayLike:
 
 
 def get_coordinates(
-    points_per_dimension: int | list, domain: np.typing.ArrayLike
-) -> np.typing.ArrayLike:
+    points_per_dimension: int | list, domain: ArrayLike
+) -> ArrayLike:
     """Gets a grid of equally spaced points on each dimension and returns
     these results in coordinate representation
 

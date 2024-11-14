@@ -1,33 +1,29 @@
 """
-Kernels
-=======
-
 Kernels used for GPs.
 
-.. note::
+:::{note}
+The defined priors and parameters of the Kernel functions pertain to data
+_after_ transforms specified in the GP are applied. In other words,
+a k_length parameter of 1.0 would be the prior after the data is scaled or
+transformed by whatever transformation is specified in the GP.
+:::
 
-    The defined priors and parameters of the Kernel functions pertain to data
-    _after_ transforms specified in the GP are applied. In other words,
-    a k_length parameter of 1.0 would be the prior after the data is scaled or
-    transformed by whatever transformation is specified in the GP.
-
-.. note::
-
-    In order to register as a parameter that numpyro can learn during
-    inference, it must begin with the prefix ``"k_"``. If it does not start
-    with this prefix, it is assumed to be a constant to the class.
-
-
-Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
-Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
+:::{note}
+In order to register as a parameter that numpyro can learn during
+inference, it must begin with the prefix ``"k_"``. If it does not start
+with this prefix, it is assumed to be a constant to the class.
+:::
 """
 
+# Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
+# Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
+
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpyro.distributions as dist
-from attrs import define, field
-from attrs.validators import instance_of
+from numpyro.distributions import Distribution
 
 from gpax.utils.prior_utils import KernelPrior, Parameter
 
@@ -37,8 +33,7 @@ def _add_jitter(x, jitter=1e-6):
 
 
 def _squared_distance(X, Z, lengthscale):
-    """Computes a square of scaled distance, :math:`\|\frac{X-Z}{l}\|^2`,
-    between X and Z are vectors with :math:`n x num_features` dimensions
+    """Computes a square of scaled distance, between X and Z are vectors with :math:`n x num_features` dimensions
 
     Parameters
     ----------
@@ -59,19 +54,13 @@ def _squared_distance(X, Z, lengthscale):
     return r2.clip(0)
 
 
-@define
 class Kernel(KernelPrior, ABC):
     """Base kernel object. All kernels should inherit from this class. Note
     that any class attribute beginning with ``k_`` will be interpreted as
     a kernel parameter (either a numpyro distribution or a constant)."""
 
-    k_noise = field(
-        default=Parameter(dist.HalfNormal(0.01), 1),
-        validator=instance_of(Parameter),
-    )
-    k_jitter = field(
-        default=Parameter(1.0e-6, 1), validator=instance_of(Parameter)
-    )
+    k_noise: Parameter = Parameter(dist.HalfNormal(0.01), 1)
+    k_jitter: Parameter = Parameter(1.0e-6, 1)
 
     def sample_prior(self, x1, x2):
         """Radial basis function kernel prior. The parameters of this function
