@@ -149,8 +149,8 @@ class Prior(ABC, MSONable):
                 params[key] = obj
         return params
 
-    @cache
     @property
+    @cache
     def params(self):
         """Returns a dictionary, indexed by the parameter name, of all
         prior parameters available to the model. The parameters are extracted
@@ -179,19 +179,3 @@ class Prior(ABC, MSONable):
         return {
             k: distribution_as_float(v.value) for k, v in self._params.items()
         }
-
-
-class MeanPrior(Prior):
-    """Simple mean prior which sets the {py:obj}`attribute_prefix` to `"m_"`"""
-
-    @property
-    def attribute_prefix(self) -> str:
-        return "m_"
-
-
-class KernelPrior(Prior):
-    """Simple mean prior which sets the {py:obj}`attribute_prefix` to `"k_"`"""
-
-    @property
-    def attribute_prefix(self) -> str:
-        return "k_"

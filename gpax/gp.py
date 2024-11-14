@@ -1,19 +1,15 @@
 """
-gp.py
-=======
-
 - Fully Bayesian implementation of Gaussian process regression
 - Variationa inference implementation of Gaussian process regression
-
-Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
-Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 """
+
+# Created by Maxim Ziatdinov (email: maxim.ziatdinov@ai4microscopy.com)
+# Modified by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass
-from functools import cache, cached_property
-from typing import Union
+from functools import cache
 from warnings import warn
 
 import jax
@@ -22,9 +18,8 @@ import jax.random as jra
 import numpy as np
 import numpyro
 import numpyro.distributions as dist
-from attrs import define, field, frozen
-from attrs.validators import gt, instance_of
 from monty.json import MSONable
+from numpy.typing import ArrayLike
 from numpyro.infer import (
     MCMC,
     NUTS,
@@ -45,87 +40,77 @@ from gpax.transforms import (
     Transform,
 )
 
-clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
-
-
-DATA_TYPES = [jnp.ndarray, np.ndarray, type(None)]
-Y_STD_DATA_TYPES = DATA_TYPES + [float] + [int]
-DATA_TYPES = tuple(DATA_TYPES)
-Y_STD_DATA_TYPES = tuple(Y_STD_DATA_TYPES)
+_clear_cache = jax._src.dispatch.xla_primitive_callable.cache_clear
 
 
 @dataclass
 class GPSample(MSONable):
     """Container for accessing GP results."""
 
-    hp: list = field(default_factory=list)
-    """Samples of the hyperparameters.
+    hp: list[dict] | None = None
+    """Samples of the hyperparameters."""
 
-    :type: :obj:`list`
-    """
-
-    y: list = None
+    y: ArrayLike | None = None
     """Samples over the GP. The shape of the returned array is
     (hp, gp, L), where n_hp indexes the kernel hyperparameter, gp indexes
     the sample from the GP, and L indexes the spatial component of the
     stochastic process."""
 
-    _mu: list = None
-    """This is a atest!"""
+    _mu: list | None = None
 
-    _sd: list = None
+    _sd: list | None = None
 
-    @cache
     @property
-    def mu(self) -> Union[list, np.ndarray, jnp.array]:
+    @cache
+    def mu(self) -> ArrayLike:
         """The mean of the GP."""
 
         if self._y.shape[0] == 1:
             return self._mu.squeeze()
         return np.mean(self._y, axis=(0, 1)).squeeze()
 
-    @cached_property
-    def sd(self):
+    @property
+    @cache
+    def sd(self) -> ArrayLike:
         """The standard deviation of the GP."""
 
         if self._y.shape[0] == 1:
             return self._sd.squeeze()
         return np.std(self._y, axis=(0, 1)).squeeze()
 
-    @cached_property
-    def ci(self):
+    @property
+    @cache
+    def ci(self) -> ArrayLike:
         """Confidence interval of mu +/- 2 sd."""
 
         return self.mu - 2.0 * self.sd, self.mu + 2.0 * self.sd
 
 
-@define
+# TODO: docs
+@dataclass
 class GaussianProcess(ABC, MSONable):
     """Core Gaussian process class."""
 
-    kernel: Kernel = field(validator=instance_of(Kernel))
-    """Testing out the new documentation!
+    kernel: Kernel
+    x: ArrayLike | None = None
+    y: ArrayLike | None = None
+    y_std: ArrayLike | None = None
+    observation_noise: bool = False
+    hp_samples: int = 200
+    gp_samples: int = 10
+    input_transform: Transform | None = None
+    output_transform: Transform | None = None
+    metadata: dict | None = None
+    use_cholesky: bool = False
+    mean: Mean | None = None
+    _is_fit: bool = False
 
-    :type: :py:class:`~Kernel`
-    """
-
-    x = field(default=None, validator=instance_of(DATA_TYPES))
-    y = field(default=None, validator=instance_of(DATA_TYPES))
-    y_std = field(default=None, validator=instance_of(Y_STD_DATA_TYPES))
-    observation_noise = field(default=False, validator=instance_of(bool))
-    hp_samples = field(default=100, validator=[instance_of(int), gt(0)])
-    gp_samples = field(default=10, validator=[instance_of(int), gt(0)])
-    input_transform = field(
-        factory=ScaleTransform, validator=instance_of((Transform, type(None)))
-    )
-    output_transform = field(
-        factory=NormalizeTransform,
-        validator=instance_of((Transform, type(None))),
-    )
-    metadata = field(factory=dict)
-    use_cholesky = field(default=False, validator=instance_of(bool))
-    mean = field(default=ConstantMean(), validator=instance_of(Mean))
-    _is_fit = field(default=False, validator=instance_of(bool))
+    def __post_init__(self):
+        self.input_transform = self.input_transform or ScaleTransform()
+        self.output_transform = self.output_transform or NormalizeTransform()
+        self.metadata = self.metadata or {}
+        self.mean = self.mean or ConstantMean()
+        _clear_cache()
 
     def _gp_prior(self, x, y=None):
         """The simple GP model. This is of course meant to be used with the
@@ -156,9 +141,6 @@ class GaussianProcess(ABC, MSONable):
     @abstractmethod
     def fit(self): ...
 
-    def __attrs_pre_init__(self):
-        clear_cache()
-
     def _class_specific_post_init(self):
         pass
 
@@ -167,7 +149,7 @@ class GaussianProcess(ABC, MSONable):
         self.input_transform.fit(self.x)
         self.output_transform.fit(self.y)
 
-    def __attrs_post_init__(self):
+    def __post_init__(self):
         # Check the status of y_std
         if self.x is None and self.y_std is not None:
             raise ValueError("y_std cannot be set if no x or y data is given")
@@ -498,13 +480,16 @@ class GaussianProcess(ABC, MSONable):
         return mu.squeeze(), sd.squeeze()
 
 
-@define
+@dataclass
 class ExactGP(GaussianProcess):
-    mcmc = field(default=None)
-    num_warmup = field(default=2000, validator=[instance_of(int), gt(0)])
-    num_chains = field(default=1, validator=[instance_of(int), gt(0)])
-    chain_method = field(default="sequential", validator=instance_of(str))
-    mcmc_run_kwargs = field(factory=dict)
+    mcmc: MCMC | None = None
+    num_warmup: int = 2000
+    num_chains: int = 1
+    chain_method: str = "sequential"
+    mcmc_run_kwargs: dict | None = None
+
+    def __post_init__(self):
+        self.mcmc_run_kwargs = self.mcmc_run_kwargs or {}
 
     def fit(self):
         """Runs Hamiltonian Monte Carlo to infer the GP parameters."""
@@ -541,16 +526,19 @@ class ExactGP(GaussianProcess):
         return hp_samples, n_hp_samples
 
 
-@define
+@dataclass
 class VariationalInferenceGP(GaussianProcess):
-    guide_factory = field(default=AutoNormal)
-    svi = field(default=None)
-    loss_factory = field(default=Trace_ELBO)
-    kernel_params = field(default=None)
-    num_steps = field(default=100, validator=[instance_of(int), gt(0)])
-    optimizer_factory = field(default=numpyro.optim.Adam)
-    optimizer_kwargs = field(factory=dict)
-    hp_samples = field(default=1, validator=[instance_of(int), gt(0)])
+    guide_factory = AutoNormal
+    svi = None
+    loss_factory = Trace_ELBO
+    kernel_params = None
+    num_steps: int = 100
+    optimizer_factory = numpyro.optim.Adam
+    optimizer_kwargs: dict | None = None
+    hp_samples: int = 1
+
+    def __post_init__(self):
+        self.optimizer_kwargs = self.optimizer_kwargs or {}
 
     def _print_summary(self):
         params_map = self.svi.guide.median(self.kernel_params.params)

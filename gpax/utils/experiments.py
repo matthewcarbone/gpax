@@ -39,7 +39,6 @@ which can be used for testing and demonstrating GP-based Bayesian optimization
 import warnings
 from abc import ABC, abstractmethod, abstractproperty
 from dataclasses import dataclass
-from functools import cache
 from itertools import product
 from typing import Any
 
@@ -364,6 +363,7 @@ class Experiment(ABC, MSONable):
 
 
 # TODO: docs
+@dataclass
 class ErrorbarExperiment(Experiment):
     """Identical to the Experiment, except that the result of __call__ not
     only returns the value of the experiment but also a single standard
@@ -386,15 +386,12 @@ class ErrorbarExperiment(Experiment):
         return self.truth(x), self.uncertainty(x)
 
 
+@dataclass
 class SimpleSinusoidal1d(Experiment):
     noise: float | int = 0.1
-
-    @cache
-    @property
-    def properties(self) -> ExperimentProperties:
-        return ExperimentProperties(
-            n_input_dim=1, domain=np.array([-1.1, 1.1]).reshape(-1, 1)
-        )
+    properties: ExperimentProperties = ExperimentProperties(
+        n_input_dim=1, domain=np.array([-1.1, 1.1]).reshape(-1, 1)
+    )
 
     # FIX: this is a problem! You forgot the noise!!!
     def _truth(self, x):
@@ -411,29 +408,25 @@ class SimpleSinusoidal1d(Experiment):
         return x, y
 
 
+@dataclass
 class SimpleDecayingSinusoidal1d(Experiment):
-    @cache
-    @property
-    def properties(self) -> ExperimentProperties:
-        return ExperimentProperties(
-            n_input_dim=1, domain=np.array([-3.0, 3.0]).reshape(-1, 1)
-        )
+    properties: ExperimentProperties = ExperimentProperties(
+        n_input_dim=1, domain=np.array([-3.0, 3.0]).reshape(-1, 1)
+    )
 
     def _truth(self, x):
         y = np.sin(5 * x + np.pi / 2) * np.exp(-(x**2))
         return np.atleast_1d(y.squeeze())
 
 
+@dataclass
 class Simple2d(Experiment):
     true_optima: ArrayLike = np.array([2.0, -4.0])
 
-    @cache
-    @property
-    def properties(self) -> ExperimentProperties:
-        return ExperimentProperties(
-            n_input_dim=2,
-            domain=np.array([[-4.0, 5.0], [-5.0, 4.0]]).T,
-        )
+    properties: ExperimentProperties = ExperimentProperties(
+        n_input_dim=2,
+        domain=np.array([[-4.0, 5.0], [-5.0, 4.0]]).T,
+    )
 
     def _truth(self, x):
         x1 = x[:, 0]
@@ -501,19 +494,17 @@ def _get_phase_from_proportion(x, x0, a, gaussian_x0, gaussian_sd):
     )
 
 
+@dataclass
 class Sine2Phase(Experiment):
     x0: float = 0.5
     a: float = 100.0
     gaussian_x0: float = 0.5
     gaussian_sd: float = 0.22
 
-    @cache
-    @property
-    def properties(self) -> ExperimentProperties:
-        return ExperimentProperties(
-            n_input_dim=2,
-            domain=np.array([[0.0, 1.0], [0.0, 1.0]]).T,
-        )
+    properties: ExperimentProperties = ExperimentProperties(
+        n_input_dim=2,
+        domain=np.array([[0.0, 1.0], [0.0, 1.0]]).T,
+    )
 
     def get_phase(self, x):
         return np.array(
@@ -537,6 +528,7 @@ _BRANIN_T = 1.0 / (8.0 * np.pi)
 _BRANIN_OPTIMA = np.array([[-np.pi, 12.275], [np.pi, 2.275], [9.42478, 2.475]])
 
 
+@dataclass
 class NegatedBranin2(Experiment):
     # All three optima are the same y_star value
     metadata: dict[str, ArrayLike] = {
@@ -544,13 +536,10 @@ class NegatedBranin2(Experiment):
         "y_star": -0.397887,
     }
 
-    @cache
-    @property
-    def properties(self) -> ExperimentProperties:
-        return ExperimentProperties(
-            n_input_dim=2,
-            domain=np.array([[-5.0, 10.0], [0.0, 15.0]]).T,
-        )
+    properties: ExperimentProperties = ExperimentProperties(
+        n_input_dim=2,
+        domain=np.array([[-5.0, 10.0], [0.0, 15.0]]).T,
+    )
 
     def _truth(self, x):
         x1 = x[:, 0]
