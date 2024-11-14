@@ -52,6 +52,7 @@ doc = [
     "linkify-it-py~=2.0",
     "sphinx-book-theme",
     "sphinx-autodoc-typehints",
+    "sphinx-toolbox",
 ]
 
 [tool.ruff]
