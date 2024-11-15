@@ -22,7 +22,10 @@ from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
 import numpyro
+from attrs import define, field
+from attrs.validators import instance_of
 from numpy.typing import ArrayLike
+from numpyro import distributions as dist
 
 from gpax.utils.prior_utils import Parameter, Prior
 
@@ -48,6 +51,7 @@ def _squared_distance(
     return r2.clip(0)
 
 
+@define
 class Kernel(Prior, ABC):
     """Base kernel object. All kernels should inherit from this class.
 
@@ -62,21 +66,19 @@ class Kernel(Prior, ABC):
     close to 0.
     """
 
+    k_noise = field(
+        default=Parameter(dist.HalfNormal(0.01), 1),
+        validator=instance_of(Parameter),
+    )
+    k_jitter = field(
+        default=Parameter(1.0e-6, 1), validator=instance_of(Parameter)
+    )
+
     @property
     def attribute_prefix(self) -> str:
         """Returns `"k_"`, which sets the prefix for class attributes that
         are considered learnable during inference."""
         return "k_"
-
-    def __init__(
-        self,
-        k_noise: Parameter | None = None,
-        k_jitter: Parameter | None = None,
-    ):
-        self.k_noise = k_noise or Parameter(
-            numpyro.distributions.HalfNormal(0.01), 1
-        )
-        self.k_jitter = k_jitter or Parameter(1.0e-6, 1)
 
     def sample_prior(self, x1, x2):
         """Radial basis function kernel prior. The parameters of this function
@@ -92,24 +94,20 @@ class Kernel(Prior, ABC):
         return self._kernel_function(x1, x2, **params)
 
 
+@define
 class ScaleKernel(Kernel):
     """A kernel which defines the `k_scale` and `k_length` parameters."""
 
-    def __init__(
-        self,
-        k_scale: Parameter = Parameter(
-            numpyro.distributions.LogNormal(0.0, 1.0), 1
-        ),
-        k_length: Parameter = Parameter(
-            numpyro.distributions.LogNormal(0.0, 1.0), 1
-        ),
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.k_scale = k_scale
-        self.k_length = k_length
+    k_scale: Parameter = field(
+        default=Parameter(numpyro.distributions.LogNormal(0.0, 1.0), 1)
+    )
+
+    k_length: Parameter = field(
+        default=Parameter(numpyro.distributions.LogNormal(0.0, 1.0), 1)
+    )
 
 
+@define
 class RBFKernel(ScaleKernel):
     def _kernel_function(
         self,
@@ -128,6 +126,7 @@ class RBFKernel(ScaleKernel):
         return k
 
 
+@define
 class MaternKernel(ScaleKernel):
     def _kernel_function(
         self,

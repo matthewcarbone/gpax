@@ -28,6 +28,7 @@ dependencies = [
     "dunamai==1.19.2",
     "jaxopt",
     "monty",
+    "attrs",
 ]
 
 dynamic = ["version"]
@@ -42,17 +43,19 @@ test = [
 ]
 doc = [
     "sphinx",
-    "numpydoc",
+    "sphinx-toolbox",
     "sphinx-copybutton",
-    "ipython",
-    "matplotlib",
-    "myst-parser",
     "sphinx-autodoc2",
-    "dunamai==1.19.2",
-    "linkify-it-py~=2.0",
     "sphinx-book-theme",
     "sphinx-autodoc-typehints",
-    "sphinx-toolbox",
+    "myst-parser",
+    "linkify-it-py~=2.0",
+]
+extra = [
+    "ipython",
+    "matplotlib",
+    "jupyterlab",
+    "sphinx-autobuild"
 ]
 
 [tool.ruff]

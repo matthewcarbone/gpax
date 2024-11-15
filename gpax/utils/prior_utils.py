@@ -6,13 +6,17 @@ contains abstractions over mean and kernel functions in the form of the
 # Created by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractproperty
-from functools import cache
+from functools import cached_property
 from typing import Union
 
 import jax.numpy as jnp
 import numpyro
 import numpyro.distributions as dist
+from attrs import define, field
+from attrs.validators import ge, instance_of
 from monty.json import MSONable
+
+from gpax.utils.utils import FallbackPrivateAttributeMixin
 
 
 def get_parameter_prior(
@@ -89,13 +93,15 @@ def distribution_as_float(parameter: dist.Distribution) -> float:
     return parameter
 
 
-class Parameter(MSONable):
+@define
+class Parameter(MSONable, FallbackPrivateAttributeMixin):
     """A parameter used in distribution
 
     Object containing a single parameter for a probabilistic model.
     Specifically, contains both the distribution (or constant) itself, as well
     as a value for ``plate``, which represents the number of independent
     instances of a variable to use during inference/training.
+    test
 
     :param value:
         The value of the parameter itself, either a distribution or float/int.
@@ -104,16 +110,14 @@ class Parameter(MSONable):
         numpyro.plate.
     """
 
-    def __init__(
-        self, value: Union[dist.Distribution, int, float], plate: int = 1
-    ):
-        self.value = value
-        self.plate = plate
+    value: Union[dist.Distribution, int, float] = field()
+    plate: int = field(default=1, validator=[instance_of(int), ge(1)])
 
     def _get_parameter_prior(self, name):
         return get_parameter_prior(name, self.value, self.plate)
 
 
+@define
 class Prior(ABC, MSONable):
     """A prior abstract base class
 
@@ -138,6 +142,7 @@ class Prior(ABC, MSONable):
 
         raise NotImplementedError
 
+    @cached_property
     def _params(self):
         keys = self.as_dict().keys()
         params = {}
@@ -149,8 +154,7 @@ class Prior(ABC, MSONable):
                 params[key] = obj
         return params
 
-    @property
-    @cache
+    @cached_property
     def params(self):
         """Returns a dictionary, indexed by the parameter name, of all
         prior parameters available to the model. The parameters are extracted

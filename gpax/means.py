@@ -19,10 +19,12 @@ constant at instantiation.
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
+from attrs import define
 
 from gpax.utils.prior_utils import Prior
 
 
+@define
 class Mean(Prior, ABC):
     """Base class for mean functions used in GPs.
 
@@ -61,6 +63,7 @@ class Mean(Prior, ABC):
         return self._mean_function(x, **params).squeeze()
 
 
+@define
 class ConstantMean(Mean):
     """The simplest mean function. Returns a constant of the input shape
     at every point.

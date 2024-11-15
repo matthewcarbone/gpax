@@ -27,15 +27,15 @@ latex_engine = "xelatex"
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
 extensions = [
-    # "sphinx.ext.autodoc",
+    "sphinx.ext.autodoc",
     "sphinx.ext.autosectionlabel",
     "sphinx.ext.autosummary",
     "sphinx.ext.intersphinx",
     "sphinx.ext.githubpages",
-    "autodoc2",
     "myst_parser",
     "sphinx_toolbox.more_autodoc.typehints",
     "sphinx_autodoc_typehints",
+    "autodoc2",
     # "sphinx.ext.napoleon",
     # "attr_utils.annotations",
     # "attr_utils.autoattrs",
@@ -60,6 +60,7 @@ autodoc2_packages = [
 ]
 autodoc2_hidden_objects = ["dunder", "private", "inherited"]
 autodoc2_class_docstring = "both"
+
 templates_path = []
 exclude_patterns = []
 
@@ -67,12 +68,12 @@ autodoc2_replace_annotations = [
     ("re.Pattern", "typing.Pattern"),
     ("markdown_it.MarkdownIt", "markdown_it.main.MarkdownIt"),
 ]
-# autodoc2_replace_bases = [
-#     (
-#         "sphinx.directives.SphinxDirective",
-#         "sphinx.util.docutils.SphinxDirective",
-#     ),
-# ]
+autodoc2_replace_bases = [
+    (
+        "sphinx.directives.SphinxDirective",
+        "sphinx.util.docutils.SphinxDirective",
+    ),
+]
 autodoc2_docstring_parser_regexes = [
     (r".*", "myst"),
 ]

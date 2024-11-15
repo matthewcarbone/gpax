@@ -132,6 +132,20 @@ class Timer:
         self.elapsed = tf - self.t0
 
 
+class FallbackPrivateAttributeMixin:
+    def __getattr__(self, attribute_name):
+        try:
+            private_name = f"_{attribute_name}"
+            return super().__getattribute__(private_name)
+        except AttributeError:
+            if attribute_name.startswith("_"):
+                attribute_name = attribute_name[1:]
+            raise AttributeError(
+                f"'{self.__class__.__name__}' object has no attribute"
+                f" '{attribute_name}' or '_{attribute_name}'"
+            )
+
+
 # def time_function(func):
 #     @wraps(func)
 #     def wrapper(*args, **kwargs):

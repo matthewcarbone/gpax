@@ -46,11 +46,12 @@ def _reverse_std(self, x):
 # Created by Matthew R. Carbone (email: x94carbone@gmail.com)
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Literal, Union
 
 import jax.numpy as jnp
 import numpy as np
+from attrs import define, field
+from attrs.validators import instance_of
 from monty.json import MSONable
 from numpy.typing import ArrayLike
 
@@ -63,13 +64,13 @@ def _ensure_2d(x):
     return x
 
 
-@dataclass
+@define
 class Transform(ABC, MSONable):
     """A base transform class upon which all other transforms are built.
     Implements the {py:obj}`forward` and {py:obj}`reverse` methods, which act
     on {py:obj}`ArrayLike` data."""
 
-    _is_fit: bool = False
+    _is_fit = field(default=False, validator=instance_of(bool))
 
     @abstractmethod
     def _fit(self):
@@ -195,7 +196,7 @@ class Transform(ABC, MSONable):
             raise ValueError(f"arr has invalid transform type {transforms_as}")
 
 
-@dataclass
+@define
 class IdentityTransform(Transform):
     """The simplest transform: does nothing. However, it must still follow
     the same rules as the other transforms. I.e., {py:obj}`Transform.fit` must
@@ -219,9 +220,10 @@ class IdentityTransform(Transform):
 
 _TMIN = -1.0
 _TMAX = 1.0
+_DATA_TYPES = (jnp.ndarray, np.ndarray, float, int, type(None))
 
 
-@dataclass
+@define
 class ScaleTransform(Transform):
     """Transformation class for scaling data, provided in the shape of shape
     `(N, d)`, to minimum -1 and maximum 1 along each dimension
@@ -241,8 +243,8 @@ class ScaleTransform(Transform):
     derived by inverting these equations.
     """
 
-    _minima: Union[jnp.ndarray, np.ndarray, float, int, None] = None
-    _maxima: Union[jnp.ndarray, np.ndarray, float, int, None] = None
+    _minima = field(default=None, validator=instance_of(_DATA_TYPES))
+    _maxima = field(default=None, validator=instance_of(_DATA_TYPES))
 
     def _fit(self, x):
         self._minima = x.min(axis=0, keepdims=True)
@@ -272,7 +274,7 @@ class ScaleTransform(Transform):
         return x * delta_r / delta_t
 
 
-@dataclass
+@define
 class NormalizeTransform(Transform):
     """Transformation class for normalizing data to the standard normal
 
@@ -293,8 +295,8 @@ class NormalizeTransform(Transform):
     derived by inverting these equations.
     """
 
-    _mean: Union[jnp.ndarray, np.ndarray, float, int, None] = None
-    _std: Union[jnp.ndarray, np.ndarray, float, int, None] = None
+    _mean = field(default=None, validator=instance_of(_DATA_TYPES))
+    _std = field(default=None, validator=instance_of(_DATA_TYPES))
 
     def _fit(self, x):
         self._mean = x.mean(axis=0, keepdims=True)

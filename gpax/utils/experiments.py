@@ -37,102 +37,56 @@ which can be used for testing and demonstrating GP-based Bayesian optimization
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import warnings
-from abc import ABC, abstractmethod, abstractproperty
-from dataclasses import dataclass
+from abc import ABC, abstractmethod
 from itertools import product
-from typing import Any
 
 import numpy as np
+from attrs import define, field, frozen
+from attrs.validators import ge, instance_of, optional
 from monty.json import MSONable
 from numpy.typing import ArrayLike
 from scipy.stats import qmc
 
+from gpax.utils.utils import FallbackPrivateAttributeMixin
 
-@dataclass(frozen=True)
-class ExperimentProperties(MSONable):
+
+@frozen
+class ExperimentProperties(MSONable, FallbackPrivateAttributeMixin):
     """Defines the core set of experiment properties, which are frozen after
     setting. These are also serializable and cannot be changed after they
     are set.
 
     :::{note}
     Generally, it should not be required to deal with this class unless
-    constructing your own experiments.
+    constructing your own experiments. Accessing an experiment's properties
+    can always be done via
+
+    ```python
+    experiment = Experiment(...)
+    experiment.properties.domain  # for example
+    ```
     :::
-    """
 
-    _n_input_dim: int
-    _n_output_dim: int = 1
-    _domain: ArrayLike | None = None
-
-    def _validate_n_input_dim(self):
-        x = self.n_input_dim
-        if not isinstance(x, int):
-            raise ValueError(f"n_input_dim ({x}) must be of type int")
-        if not isinstance(x >= 1):
-            raise ValueError(f"n_input_dim ({x}) must be >= 1")
-
-    def _validate_n_output_dim(self):
-        x = self.n_output_dim
-        if not isinstance(x, int):
-            raise ValueError(f"n_output_dim ({x}) must be of type int")
-        if not isinstance(x >= 1):
-            raise ValueError(f"n_output_dim ({x}) must be >= 1")
-
-    def _validate_domain(self):
-        if self.domain is None:
-            return
-        x = self.domain
-        if not x.ndim == 2 or x.shape[0] != 2:
-            raise ValueError("domain must be of shape `(2, d)`")
-        if np.any(x[0, :] >= x[1, :]):
-            raise ValueError("domain[0, :] must be < domain[1, :]")
-
-    def __post_init__(self):
-        self._validate_n_input_dim()
-        self._validate_n_output_dim()
-        self._validate_domain()
-
-    @property
-    def n_input_dim(self) -> int:
-        """The number of input dimensions to the experiment. In other words,
-        the input to the experiment should always be of shape `(N, d)`,
-        where `d` is `n_input_dim`."""
-        return self._n_input_dim
-
-    @n_input_dim.setter
-    def n_input_dim(self, x: int):
-        self._n_input_dim = x
-        self._validate_n_input_dim()
-
-    @property
-    def n_output_dim(self) -> int:
-        """The number of output dimensions from the experiment. Generally,
+    :param n_input_dim: The number of input dimensions to the experiment. In
+        other words, the input to the experiment should always be of shape
+        `(N, d)`, where `d` is `n_input_dim`.
+    :param n_output_dim: The number of output dimensions from the
+        experiment. Generally,
         this should be 1, indicating that the output will be a
         1-dimensional vector of shape `(N,)` or `(N, 1)`. However, in
         principle, there is no reason `n_output_dim` cannot be some
         number greater than 1. In this case, each observation is a vector,
-        such as a spectrum or image."""
-
-        return self._n_output_dim
-
-    @n_output_dim.setter
-    def n_output_dim(self, x: int):
-        self._n_output_dim = x
-        self._validate_n_output_dim()
-
-    @property
-    def domain(self) -> ArrayLike | None:
-        """The domain of validity for the experiment. Should be an
+        such as a spectrum or image.
+    :params domain:
+        The domain of validity for the experiment. Should be an
         {py:obj}`ArrayLike` object of shape `(2, d)`, where `d` is the
         number of input dimensions given by `n_input_dim`. Each column
-        represents the minimum and maximum along that dimension."""
+        represents the minimum and maximum along that dimension.
+    """
 
-        return self._domain
-
-    @domain.setter
-    def domain(self, x: ArrayLike):
-        self._domain = x
-        self._validate_domain()
+    _n_input_dim: int = field(validator=instance_of(int))
+    _n_output_dim = 1
+    _domain = field(validator=optional(instance_of(np.ndarray)))
 
 
 # TODO: docs
@@ -243,7 +197,7 @@ def get_latin_hypercube_points(domain, n=5, seed=None):
 
 
 # TODO: docs
-@dataclass
+@define
 class Experiment(ABC, MSONable):
     """Abstract base class for an experiment, which can be loosely thought of
     as a class which has a single useful method: __call__. A call to the
@@ -251,14 +205,8 @@ class Experiment(ABC, MSONable):
     x. The output is always a (N,)-shape array containing the scalar
     observations at each point x."""
 
-    metadata: dict[str, Any] | None = None
-
-    @abstractproperty
-    def properties(self) -> ExperimentProperties:
-        raise NotImplementedError
-
-    def __post_init__(self):
-        self.metadata = self.metadata or {}
+    metadata = field(factory=dict)
+    properties = field(default=None)
 
     @abstractmethod
     def _truth(self, _):
@@ -363,7 +311,7 @@ class Experiment(ABC, MSONable):
 
 
 # TODO: docs
-@dataclass
+@define
 class ErrorbarExperiment(Experiment):
     """Identical to the Experiment, except that the result of __call__ not
     only returns the value of the experiment but also a single standard
@@ -386,11 +334,15 @@ class ErrorbarExperiment(Experiment):
         return self.truth(x), self.uncertainty(x)
 
 
-@dataclass
+@define
 class SimpleSinusoidal1d(Experiment):
-    noise: float | int = 0.1
-    properties: ExperimentProperties = ExperimentProperties(
-        n_input_dim=1, domain=np.array([-1.1, 1.1]).reshape(-1, 1)
+    properties: ExperimentProperties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=1, domain=np.array([-1.1, 1.1]).reshape(-1, 1)
+        )
+    )
+    noise: float | int = field(
+        default=0.1, validator=[instance_of((float, int)), ge(0.0)]
     )
 
     # FIX: this is a problem! You forgot the noise!!!
@@ -408,10 +360,12 @@ class SimpleSinusoidal1d(Experiment):
         return x, y
 
 
-@dataclass
+@define
 class SimpleDecayingSinusoidal1d(Experiment):
-    properties: ExperimentProperties = ExperimentProperties(
-        n_input_dim=1, domain=np.array([-3.0, 3.0]).reshape(-1, 1)
+    properties: ExperimentProperties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=1, domain=np.array([-3.0, 3.0]).reshape(-1, 1)
+        )
     )
 
     def _truth(self, x):
@@ -419,14 +373,16 @@ class SimpleDecayingSinusoidal1d(Experiment):
         return np.atleast_1d(y.squeeze())
 
 
-@dataclass
+@define
 class Simple2d(Experiment):
-    true_optima: ArrayLike = np.array([2.0, -4.0])
-
-    properties: ExperimentProperties = ExperimentProperties(
-        n_input_dim=2,
-        domain=np.array([[-4.0, 5.0], [-5.0, 4.0]]).T,
+    properties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=2,
+            domain=np.array([[-4.0, 5.0], [-5.0, 4.0]]).T,
+        )
     )
+
+    true_optima = np.array([2.0, -4.0])
 
     def _truth(self, x):
         x1 = x[:, 0]
@@ -494,17 +450,18 @@ def _get_phase_from_proportion(x, x0, a, gaussian_x0, gaussian_sd):
     )
 
 
-@dataclass
+@define
 class Sine2Phase(Experiment):
-    x0: float = 0.5
-    a: float = 100.0
-    gaussian_x0: float = 0.5
-    gaussian_sd: float = 0.22
-
-    properties: ExperimentProperties = ExperimentProperties(
-        n_input_dim=2,
-        domain=np.array([[0.0, 1.0], [0.0, 1.0]]).T,
+    properties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=2,
+            domain=np.array([[0.0, 1.0], [0.0, 1.0]]).T,
+        )
     )
+    x0 = field(default=0.5)
+    a = field(default=100.0)
+    gaussian_x0 = field(default=0.5)
+    gaussian_sd = field(default=0.22)
 
     def get_phase(self, x):
         return np.array(
@@ -528,18 +485,17 @@ _BRANIN_T = 1.0 / (8.0 * np.pi)
 _BRANIN_OPTIMA = np.array([[-np.pi, 12.275], [np.pi, 2.275], [9.42478, 2.475]])
 
 
-@dataclass
+@define
 class NegatedBranin2(Experiment):
     # All three optima are the same y_star value
-    metadata: dict[str, ArrayLike] = {
-        "x_star": _BRANIN_OPTIMA,
-        "y_star": -0.397887,
-    }
-
-    properties: ExperimentProperties = ExperimentProperties(
-        n_input_dim=2,
-        domain=np.array([[-5.0, 10.0], [0.0, 15.0]]).T,
+    properties = field(
+        factory=lambda: ExperimentProperties(
+            n_input_dim=2,
+            domain=np.array([[-5.0, 10.0], [0.0, 15.0]]).T,
+        )
     )
+    # All three optima are the same y_star value
+    metadata = field(default={"x_star": _BRANIN_OPTIMA, "y_star": -0.397887})
 
     def _truth(self, x):
         x1 = x[:, 0]

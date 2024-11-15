@@ -5,6 +5,7 @@
 :hidden:
 
 installation.md
+modules.md
 apidocs/index.rst
 ```
 
