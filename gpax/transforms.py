@@ -99,6 +99,7 @@ class Transform(ABC, MSONable):
 
         if self._is_fit:
             raise RuntimeError("Cannot call fit on a Transform more than once")
+        self._is_fit = True
         if x is None:
             return
         self._fit(x)
@@ -203,7 +204,7 @@ class IdentityTransform(Transform):
     still be called before attempting to execute the transform."""
 
     def _fit(self, _):
-        self._is_fit = True
+        return
 
     def _forward_mean(self, x):
         return x
@@ -225,10 +226,10 @@ _DATA_TYPES = (jnp.ndarray, np.ndarray, float, int, type(None))
 
 @define
 class ScaleTransform(Transform):
-    """Transformation class for scaling data, provided in the shape of shape
+    r"""Transformation class for scaling data, provided in the shape of shape
     `(N, d)`, to minimum -1 and maximum 1 along each dimension
 
-    Given data $x \in \mathbb{R}^{N \\times d}$, with a vector of minima and
+    Given data $x \\in \mathbb{R}^{N \\times d}$, with a vector of minima and
     maxima of $x_\\mathrm{min}$ and $x_\\mathrm{max}$ along each axis, the
     transformed data $x'$ will be given by the transformation,
 
@@ -249,7 +250,6 @@ class ScaleTransform(Transform):
     def _fit(self, x):
         self._minima = x.min(axis=0, keepdims=True)
         self._maxima = x.max(axis=0, keepdims=True)
-        self._is_fit = True
 
     def _forward_mean(self, x):
         numerator = x - self._minima
@@ -301,7 +301,6 @@ class NormalizeTransform(Transform):
     def _fit(self, x):
         self._mean = x.mean(axis=0, keepdims=True)
         self._std = x.std(axis=0, keepdims=True)
-        self._is_fit = True
 
     def _forward_mean(self, x):
         denominator = self._std + _EPSILON
