@@ -147,12 +147,22 @@ class MaternKernel(ScaleKernel):
         return k
 
 
-#
-# @jit
-# def _periodic_kernel(X, Z, k_scale, k_length, k_period, noise, jitter):
-#     d = X[:, None] - Z[None]
-#     scaled_sin = jnp.sin(math.pi * d / k_period) / k_length
-#     k = k_scale * jnp.exp(-2 * (scaled_sin**2).sum(-1))
-#     if X.shape == Z.shape:
-#         k += _add_jitter(noise, jitter) * jnp.eye(X.shape[0])
-#     return k
+@define
+class PeriodicKernel(ScaleKernel):
+    def _kernel_function(
+        self,
+        X,
+        Z,
+        k_scale,
+        k_length,
+        k_period,
+        k_noise=0.0,
+        k_jitter=1e-6,
+        apply_noise=True,
+    ):
+        d = X[:, None] - Z[None]
+        scaled_sin = jnp.sin(jnp.pi * d / k_period) / k_length
+        k = k_scale * jnp.exp(-2 * (scaled_sin**2).sum(-1))
+        if X.shape == Z.shape and apply_noise:
+            k += _add_jitter(k_noise, k_jitter) * jnp.eye(X.shape[0])
+        return k
