@@ -19,7 +19,7 @@ constant at instantiation.
 from abc import ABC, abstractmethod
 
 import jax.numpy as jnp
-from attrs import define
+from attrs import define, field
 
 from gpax.utils.prior_utils import Prior
 
@@ -72,8 +72,7 @@ class ConstantMean(Mean):
         The value of the mean function to return at every point.
     """
 
-    def __init__(self, mean: float | int = 0.0):
-        self.mean = mean
+    mean: float | int = field(default=1.0)
 
     def _mean_function(self, x):
         return jnp.ones(x.shape[0]) * self.mean

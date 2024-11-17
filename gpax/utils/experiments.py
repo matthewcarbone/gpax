@@ -47,6 +47,7 @@ from monty.json import MSONable
 from numpy.typing import ArrayLike
 from scipy.stats import qmc
 
+from gpax.state import get_rng_key
 from gpax.utils.utils import FallbackPrivateAttributeMixin
 
 
@@ -85,8 +86,8 @@ class ExperimentProperties(MSONable, FallbackPrivateAttributeMixin):
     """
 
     _n_input_dim: int = field(validator=instance_of(int))
-    _n_output_dim = 1
-    _domain = field(validator=optional(instance_of(np.ndarray)))
+    _n_output_dim: int = field(default=1, validator=instance_of(int))
+    _domain = field(default=None, validator=optional(instance_of(np.ndarray)))
 
 
 # TODO: docs
@@ -173,7 +174,7 @@ def get_random_points(domain, n=1):
 
 
 # TODO: docs
-def get_latin_hypercube_points(domain, n=5, seed=None):
+def get_latin_hypercube_points(domain, n=5):
     """Gets a random selection of points in the provided domain using the
     Latin Hypercube sampling algorithm.
 
@@ -188,6 +189,8 @@ def get_latin_hypercube_points(domain, n=5, seed=None):
     -------
     np.ndarray
     """
+
+    seed, _ = get_rng_key()
 
     sampler = qmc.LatinHypercube(
         d=domain.shape[1], optimization="random-cd", seed=seed
@@ -253,7 +256,8 @@ class Experiment(ABC, MSONable):
     def _validate_output(self, y):
         # Ensure y has the right shape
         if not y.ndim == 1:
-            raise ValueError("y must have shape (N,)")
+            if not y.shape[1] == self.n_output_dim:
+                raise ValueError("y must have shape (N, d') when d' > 1")
 
     def truth(self, x: np.ndarray) -> np.ndarray:
         """Access the noiseless results of an "experiment"."""
@@ -349,7 +353,8 @@ class SimpleSinusoidal1d(Experiment):
     def _truth(self, x):
         return np.atleast_1d(np.sin(10.0 * x).squeeze())
 
-    def default_dataset(self, seed=0, num_init_points=25):
+    def default_dataset(self, num_init_points=25):
+        seed, _ = get_rng_key()
         np.random.seed(seed)
 
         x = np.random.uniform(-1.0, 1.0, num_init_points).reshape(-1, 1)
@@ -396,7 +401,10 @@ class Simple2d(Experiment):
         return np.atleast_1d(y.squeeze())
 
 
-def _mu_Gaussians(p, E=np.linspace(-1, 1, 100), x0=0.5, sd=0.05):
+_EGRID = np.linspace(-1, 1, 100)
+
+
+def _mu_Gaussians(p, x0=0.5, sd=0.05):
     """Returns a dummy "spectrum" which is just two Gaussian functions. The
     proportion of the two functions is goverened by ``p``.
 
@@ -404,8 +412,6 @@ def _mu_Gaussians(p, E=np.linspace(-1, 1, 100), x0=0.5, sd=0.05):
     ----------
     p : float
         The proportion of the first phase.
-    E : numpy.ndarray
-        Energy grid.
     x0 : float
         The absolute value of the location of each Gaussian.
     sd : float
@@ -419,8 +425,8 @@ def _mu_Gaussians(p, E=np.linspace(-1, 1, 100), x0=0.5, sd=0.05):
 
     p2 = 1.0 - p
     sd = sd**2
-    e = -((x0 + E) ** 2) / sd
-    e2 = -((x0 - E) ** 2) / sd
+    e = -((x0 + _EGRID) ** 2) / sd
+    e2 = -((x0 - _EGRID) ** 2) / sd
     return p * np.exp(e) + p2 * np.exp(e2)
 
 
@@ -455,6 +461,7 @@ class Sine2Phase(Experiment):
     properties = field(
         factory=lambda: ExperimentProperties(
             n_input_dim=2,
+            n_output_dim=len(_EGRID),
             domain=np.array([[0.0, 1.0], [0.0, 1.0]]).T,
         )
     )
